@@ -1,25 +1,71 @@
 {
   "expo": {
-    "name": "infomatt360-mobile",
+    "name": "InfoMatt360",
     "slug": "infomatt360-mobile",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1565C0"
+    },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": false,
+      "bundleIdentifier": "com.tecnomatt.infomatt360",
+      "infoPlist": {
+        "NSCameraUsageDescription": "InfoMatt360 necesita acceso a la camara para capturar evidencias fotograficas y de video.",
+        "NSPhotoLibraryUsageDescription": "InfoMatt360 necesita acceso a la galeria para adjuntar evidencias existentes.",
+        "NSLocationWhenInUseUsageDescription": "InfoMatt360 necesita acceso al GPS para geolocalizar los registros capturados en campo."
+      }
     },
     "android": {
+      "package": "com.tecnomatt.infomatt360",
+      "versionCode": 1,
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
+        "monochromeImage": "./assets/android-icon-monochrome.png",
+        "backgroundColor": "#E6F4FE"
       },
-      "predictiveBackGestureEnabled": false
+      "permissions": [
+        "CAMERA",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "READ_MEDIA_IMAGES",
+        "READ_MEDIA_VIDEO",
+        "RECORD_AUDIO"
+      ]
     },
-    "web": {
-      "favicon": "./assets/favicon.png"
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "InfoMatt360 necesita acceso al GPS para geolocalizar los registros capturados en campo."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "InfoMatt360 necesita acceso a la camara para capturar evidencias fotograficas y de video.",
+          "photosPermission": "InfoMatt360 necesita acceso a la galeria para adjuntar evidencias existentes."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "InfoMatt360 necesita acceso a la camara para capturar evidencias fotograficas y de video.",
+          "microphonePermission": "InfoMatt360 necesita acceso al microfono para grabar video con audio.",
+          "recordAudioAndroid": true
+        }
+      ],
+      "expo-secure-store"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "REPLACE_WITH_EAS_PROJECT_ID"
+      }
     }
   }
 }
