@@ -158,7 +158,7 @@ export interface QueuedRecord {
 
 // ─── Evidencias ──────────────────────────────────────────────────────
 
-export type EvidenceType = 'photo' | 'video' | 'audio' | 'document' | 'signature';
+export type EvidenceType = 'photo' | 'video' | 'audio' | 'document' | 'signature' | 'fingerprint';
 
 export interface Evidence {
   local_id: string;

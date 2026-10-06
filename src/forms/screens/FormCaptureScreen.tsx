@@ -25,7 +25,7 @@ import FieldRenderer from '../components/FieldRenderer';
 import RepeatGroupRenderer, { getRepeatFieldId } from '../components/RepeatGroupRenderer';
 import PageProgressBar from '../components/PageProgressBar';
 import SignatureModal from '../components/SignatureModal';
-import FingerprintModal from '../components/FingerprintModal';
+import FingerprintModal, { type FingerprintResult } from '../components/FingerprintModal';
 import { validateForm, validateField } from '../utils/validation';
 import { isFieldVisible } from '../utils/conditionalVisibility';
 import {
@@ -313,9 +313,21 @@ export default function FormCaptureScreen() {
   );
 
   const handleFingerprintSave = useCallback(
-    (fingerprintBase64: string, hand: 'left' | 'right') => {
+    (result: FingerprintResult) => {
       if (fingerprintFieldId) {
-        handleFieldChange(fingerprintFieldId, { dataUri: fingerprintBase64, hand, type: 'fingerprint' });
+        // Guardar en valores del formulario (dataUri para preview inline,
+        // fileUri para acceso a archivo, accesible para actas)
+        handleFieldChange(fingerprintFieldId, {
+          dataUri: result.dataUri,
+          fileUri: result.fileUri,
+          hand: result.hand,
+          method: result.method,
+          fileSize: result.fileSize,
+          type: 'fingerprint',
+        });
+        // Agregar a evidencePaths para que se registre como evidencia
+        // al guardar el registro (visible para huellas y actas)
+        setEvidencePaths((prev) => [...prev, result.fileUri]);
       }
       setFingerprintFieldId(null);
     },
@@ -366,13 +378,15 @@ export default function FormCaptureScreen() {
       });
 
       // Registrar evidencias en la tabla de evidencias
+      // Detectar huellas digitales por su ruta (directorio fingerprints/)
       for (const uri of evidencePaths) {
+        const isFingerprint = uri.includes('/fingerprints/');
         insertEvidence({
           localId: uuidv4(),
           recordLocalId,
-          type: 'photo',
+          type: isFingerprint ? 'fingerprint' : 'photo',
           fileUri: uri,
-          mimeType: 'image/jpeg',
+          mimeType: isFingerprint && uri.endsWith('.png') ? 'image/png' : 'image/jpeg',
           fileSize: 0, // se actualizara al subir
         });
       }

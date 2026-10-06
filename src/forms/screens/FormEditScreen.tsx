@@ -24,7 +24,7 @@ import FieldRenderer from '../components/FieldRenderer';
 import RepeatGroupRenderer, { getRepeatFieldId, parseRepeatFieldId } from '../components/RepeatGroupRenderer';
 import PageProgressBar from '../components/PageProgressBar';
 import SignatureModal from '../components/SignatureModal';
-import FingerprintModal from '../components/FingerprintModal';
+import FingerprintModal, { type FingerprintResult } from '../components/FingerprintModal';
 import { validateForm } from '../utils/validation';
 import { isFieldVisible } from '../utils/conditionalVisibility';
 import {
@@ -205,9 +205,16 @@ export default function FormEditScreen() {
   );
 
   const handleFingerprintSave = useCallback(
-    (fingerprintBase64: string, hand: 'left' | 'right') => {
+    (result: FingerprintResult) => {
       if (fingerprintFieldId) {
-        handleFieldChange(fingerprintFieldId, { dataUri: fingerprintBase64, hand, type: 'fingerprint' });
+        handleFieldChange(fingerprintFieldId, {
+          dataUri: result.dataUri,
+          fileUri: result.fileUri,
+          hand: result.hand,
+          method: result.method,
+          fileSize: result.fileSize,
+          type: 'fingerprint',
+        });
       }
       setFingerprintFieldId(null);
     },

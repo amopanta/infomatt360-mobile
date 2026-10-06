@@ -365,7 +365,7 @@ export default function FieldRenderer({
     }
 
     case 'fingerprint': {
-      const fpValue = value as { dataUri?: string; hand?: string } | null;
+      const fpValue = value as { dataUri?: string; fileUri?: string; hand?: string; method?: string } | null;
       return (
         <View style={styles.field}>
           {renderLabel()}
@@ -381,7 +381,12 @@ export default function FieldRenderer({
                   <Text style={styles.fingerprintHand}>
                     Pulgar {fpValue.hand === 'left' ? 'izquierdo' : 'derecho'}
                   </Text>
-                  <Text style={styles.fingerprintStatus}>Capturada</Text>
+                  <Text style={styles.fingerprintStatus}>
+                    {fpValue.method === 'camera' ? '📷 Foto' : '👆 Tactil'} - Capturada
+                  </Text>
+                  <Text style={styles.fingerprintEvidence}>
+                    Disponible como evidencia
+                  </Text>
                 </View>
               </View>
               <TouchableOpacity
@@ -399,7 +404,7 @@ export default function FieldRenderer({
               <Text style={styles.fingerprintIcon}>👆</Text>
               <Text style={styles.captureButtonText}>Capturar huella digital</Text>
               <Text style={styles.fingerprintHint}>
-                Presione el pulgar en la pantalla para registrar
+                Use la camara o presione el pulgar en pantalla
               </Text>
             </TouchableOpacity>
           )}
@@ -658,6 +663,12 @@ const styles = StyleSheet.create({
     fontSize: fontSize.caption,
     color: colors.success,
     marginTop: 2,
+  },
+  fingerprintEvidence: {
+    fontSize: fontSize.caption - 1,
+    color: colors.primary,
+    marginTop: 2,
+    fontStyle: 'italic',
   },
   recaptureButton: {
     borderTopWidth: 1,

@@ -262,8 +262,15 @@ export default function RecordDetailScreen() {
                 }
                 activeOpacity={0.8}
               >
-                {ev.type === 'photo' ? (
-                  <Image source={{ uri: ev.file_uri }} style={styles.evidenceImage} resizeMode="cover" />
+                {ev.type === 'photo' || ev.type === 'fingerprint' || ev.type === 'signature' || ev.type === 'document' ? (
+                  <View>
+                    <Image source={{ uri: ev.file_uri }} style={styles.evidenceImage} resizeMode="cover" />
+                    {ev.type === 'fingerprint' && (
+                      <View style={styles.evidenceTypeBadge}>
+                        <Text style={styles.evidenceTypeBadgeText}>Huella</Text>
+                      </View>
+                    )}
+                  </View>
                 ) : (
                   <View style={[styles.evidenceImage, styles.videoPlaceholder]}>
                     <Text style={styles.videoIcon}>▶</Text>
@@ -478,6 +485,20 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     borderWidth: 1,
     borderColor: 'white',
+  },
+  evidenceTypeBadge: {
+    position: 'absolute',
+    top: 4,
+    left: 4,
+    backgroundColor: colors.primary + 'DD',
+    borderRadius: 4,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+  },
+  evidenceTypeBadgeText: {
+    fontSize: 9,
+    color: '#FFF',
+    fontWeight: '600',
   },
   // Acciones
   actionsRow: {

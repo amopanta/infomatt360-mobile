@@ -1,15 +1,27 @@
 /**
- * Modal de captura de huella digital tactil.
+ * Modal de captura de huella digital del participante (doc 134).
  *
- * Usa react-native-signature-canvas con un area circular
- * donde el usuario presiona el pulgar/dedo. El patron de
- * contacto se captura como imagen PNG base64.
+ * Dos métodos:
+ *   1. **Cámara** (primario): usa expo-image-picker para fotografiar
+ *      la huella. Guía visual, verificación de calidad básica.
+ *      La imagen se guarda como archivo accesible para evidencia y
+ *      generación de actas.
+ *   2. **Táctil** (secundario): captura por presión del pulgar en
+ *      pantalla usando react-native-signature-canvas. Genera un PNG.
  *
- * Incluye guia visual con indicador de dedo y opcion
- * de capturar ambas manos (pulgar izquierdo/derecho).
+ * Ambos métodos devuelven:
+ *   - fileUri: ruta local del archivo PNG/JPEG guardado en disco
+ *   - dataUri: data URI base64 para preview en el formulario
+ *   - hand: 'left' | 'right'
+ *   - method: 'camera' | 'touch'
+ *
+ * La imagen queda visible y accesible para:
+ *   - Vista previa en el formulario
+ *   - Tabla de evidencias (se inserta en evidence)
+ *   - Generación de actas (accesible por file_uri y remote_url)
  */
 
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -17,20 +29,40 @@ import {
   TouchableOpacity,
   StyleSheet,
   Dimensions,
+  Image,
+  Alert,
+  ActivityIndicator,
 } from 'react-native';
 import SignatureCanvas, { type SignatureViewRef } from 'react-native-signature-canvas';
+import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system/legacy';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
+
+/** Resultado de la captura de huella */
+export interface FingerprintResult {
+  /** Ruta local del archivo en disco (para evidence table) */
+  fileUri: string;
+  /** Data URI base64 para preview inline en el formulario */
+  dataUri: string;
+  /** Mano capturada */
+  hand: 'left' | 'right';
+  /** Método de captura */
+  method: 'camera' | 'touch';
+  /** Tamaño del archivo en bytes */
+  fileSize: number;
+}
 
 interface FingerprintModalProps {
   visible: boolean;
-  onSave: (fingerprintBase64: string, hand: 'left' | 'right') => void;
+  onSave: (result: FingerprintResult) => void;
   onCancel: () => void;
 }
 
+type Hand = 'left' | 'right';
+type CaptureMethod = 'camera' | 'touch';
+
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CAPTURE_SIZE = Math.min(SCREEN_WIDTH - spacing.lg * 2, 300);
-
-type Hand = 'left' | 'right';
 
 export default function FingerprintModal({
   visible,
@@ -39,20 +71,136 @@ export default function FingerprintModal({
 }: FingerprintModalProps) {
   const signatureRef = useRef<SignatureViewRef>(null);
   const [selectedHand, setSelectedHand] = useState<Hand>('right');
+  const [captureMethod, setCaptureMethod] = useState<CaptureMethod>('camera');
   const [hasTouch, setHasTouch] = useState(false);
+  const [previewUri, setPreviewUri] = useState<string | null>(null);
+  const [capturedFileUri, setCapturedFileUri] = useState<string | null>(null);
+  const [capturing, setCapturing] = useState(false);
 
-  const handleOK = (signature: string) => {
-    // signature es un data URI: "data:image/png;base64,..."
-    onSave(signature, selectedHand);
+  const resetState = useCallback(() => {
     setHasTouch(false);
-  };
+    setPreviewUri(null);
+    setCapturedFileUri(null);
+    setCapturing(false);
+    signatureRef.current?.clearSignature();
+  }, []);
+
+  // ── Guardar base64 a archivo en disco ──────────────────────────────
+  const saveBase64ToFile = useCallback(async (base64Data: string): Promise<{ fileUri: string; fileSize: number }> => {
+    const dir = FileSystem.documentDirectory ?? FileSystem.cacheDirectory ?? '';
+    const timestamp = Date.now();
+    const fileName = `fingerprint_${selectedHand}_${timestamp}.png`;
+    const fileUri = `${dir}fingerprints/${fileName}`;
+
+    // Crear directorio si no existe
+    const dirPath = `${dir}fingerprints`;
+    const dirInfo = await FileSystem.getInfoAsync(dirPath);
+    if (!dirInfo.exists) {
+      await FileSystem.makeDirectoryAsync(dirPath, { intermediates: true });
+    }
+
+    // Quitar el prefijo data:image/png;base64, si existe
+    const rawBase64 = base64Data.replace(/^data:image\/\w+;base64,/, '');
+    await FileSystem.writeAsStringAsync(fileUri, rawBase64, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+
+    const info = await FileSystem.getInfoAsync(fileUri);
+    const fileSize = (info as any).size ?? 0;
+
+    return { fileUri, fileSize };
+  }, [selectedHand]);
+
+  // ── Captura con cámara (método primario, doc 134) ──────────────────
+  const handleCameraCapture = useCallback(async () => {
+    setCapturing(true);
+    try {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('Permiso requerido', 'Se necesita acceso a la cámara para fotografiar la huella.');
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ['images'],
+        quality: 0.9, // Alta calidad para huellas
+        allowsEditing: true,
+        aspect: [1, 1], // Recorte cuadrado para centrar la huella
+        exif: true,
+      });
+
+      if (result.canceled || !result.assets?.[0]) return;
+
+      const asset = result.assets[0];
+      const sourceUri = asset.uri;
+
+      // Copiar a directorio persistente de huellas
+      const dir = FileSystem.documentDirectory ?? FileSystem.cacheDirectory ?? '';
+      const timestamp = Date.now();
+      const fileName = `fingerprint_${selectedHand}_camera_${timestamp}.jpg`;
+      const destUri = `${dir}fingerprints/${fileName}`;
+
+      const dirPath = `${dir}fingerprints`;
+      const dirInfo = await FileSystem.getInfoAsync(dirPath);
+      if (!dirInfo.exists) {
+        await FileSystem.makeDirectoryAsync(dirPath, { intermediates: true });
+      }
+
+      await FileSystem.copyAsync({ from: sourceUri, to: destUri });
+      const info = await FileSystem.getInfoAsync(destUri);
+      const fileSize = (info as any).size ?? 0;
+
+      // Leer como base64 para preview
+      const base64 = await FileSystem.readAsStringAsync(destUri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      const dataUri = `data:image/jpeg;base64,${base64}`;
+
+      setPreviewUri(dataUri);
+      setCapturedFileUri(destUri);
+
+      // Guardar resultado
+      onSave({
+        fileUri: destUri,
+        dataUri,
+        hand: selectedHand,
+        method: 'camera',
+        fileSize,
+      });
+      resetState();
+    } catch (err: any) {
+      Alert.alert('Error', `No se pudo capturar la imagen: ${err.message}`);
+    } finally {
+      setCapturing(false);
+    }
+  }, [selectedHand, onSave, resetState]);
+
+  // ── Captura táctil (método secundario) ─────────────────────────────
+  const handleTouchOK = useCallback(async (signature: string) => {
+    try {
+      const { fileUri, fileSize } = await saveBase64ToFile(signature);
+
+      onSave({
+        fileUri,
+        dataUri: signature,
+        hand: selectedHand,
+        method: 'touch',
+        fileSize,
+      });
+      resetState();
+    } catch (err: any) {
+      Alert.alert('Error', `No se pudo guardar la huella: ${err.message}`);
+    }
+  }, [selectedHand, onSave, resetState, saveBase64ToFile]);
 
   const handleClear = () => {
     signatureRef.current?.clearSignature();
     setHasTouch(false);
+    setPreviewUri(null);
+    setCapturedFileUri(null);
   };
 
-  const handleConfirm = () => {
+  const handleConfirmTouch = () => {
     signatureRef.current?.readSignature();
   };
 
@@ -60,7 +208,12 @@ export default function FingerprintModal({
     setHasTouch(true);
   };
 
-  // CSS para el canvas: fondo gris claro, trazo mas grueso para simular huella
+  const handleCancel = () => {
+    resetState();
+    onCancel();
+  };
+
+  // CSS para el canvas táctil
   const webStyle = `.m-signature-pad {
     box-shadow: none;
     border: none;
@@ -93,15 +246,62 @@ export default function FingerprintModal({
       visible={visible}
       animationType="slide"
       transparent={false}
-      onRequestClose={onCancel}
+      onRequestClose={handleCancel}
     >
       <View style={styles.container}>
         {/* Header */}
         <View style={styles.header}>
           <Text style={styles.title}>Captura de huella digital</Text>
           <Text style={styles.subtitle}>
-            Presione el pulgar firmemente en el area circular
+            {captureMethod === 'camera'
+              ? 'Fotografíe la huella del participante'
+              : 'Presione el pulgar firmemente en el área circular'}
           </Text>
+        </View>
+
+        {/* Selector de método */}
+        <View style={styles.methodSelector}>
+          <TouchableOpacity
+            style={[
+              styles.methodButton,
+              captureMethod === 'camera' && styles.methodButtonActive,
+            ]}
+            onPress={() => {
+              setCaptureMethod('camera');
+              handleClear();
+            }}
+          >
+            <Text style={styles.methodIcon}>📷</Text>
+            <Text
+              style={[
+                styles.methodLabel,
+                captureMethod === 'camera' && styles.methodLabelActive,
+              ]}
+            >
+              Cámara
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.methodButton,
+              captureMethod === 'touch' && styles.methodButtonActive,
+            ]}
+            onPress={() => {
+              setCaptureMethod('touch');
+              handleClear();
+            }}
+          >
+            <Text style={styles.methodIcon}>👆</Text>
+            <Text
+              style={[
+                styles.methodLabel,
+                captureMethod === 'touch' && styles.methodLabelActive,
+              ]}
+            >
+              Táctil
+            </Text>
+          </TouchableOpacity>
         </View>
 
         {/* Selector de mano */}
@@ -151,72 +351,149 @@ export default function FingerprintModal({
           </TouchableOpacity>
         </View>
 
-        {/* Area de captura circular */}
+        {/* Área de captura */}
         <View style={styles.captureArea}>
-          <View style={styles.captureCircleOuter}>
-            <View style={styles.captureCircle}>
-              <SignatureCanvas
-                ref={signatureRef}
-                onOK={handleOK}
-                onBegin={handleBegin}
-                onEmpty={() => setHasTouch(false)}
-                webStyle={webStyle}
-                backgroundColor="#F5F5F5"
-                penColor="#333333"
-                minWidth={4}
-                maxWidth={8}
-                dotSize={6}
-                style={styles.canvas}
-              />
-
-              {/* Guia visual cuando no hay toque */}
-              {!hasTouch && (
-                <View style={styles.guideOverlay} pointerEvents="none">
-                  <Text style={styles.guideIcon}>👆</Text>
-                  <Text style={styles.guideText}>
-                    Coloque su{'\n'}pulgar aqui
+          {captureMethod === 'camera' ? (
+            // ── Modo cámara ──
+            <View style={styles.cameraArea}>
+              {previewUri ? (
+                <View style={styles.previewContainer}>
+                  <Image
+                    source={{ uri: previewUri }}
+                    style={styles.previewImage}
+                    resizeMode="contain"
+                  />
+                  <Text style={styles.previewLabel}>
+                    Huella capturada - Pulgar {selectedHand === 'left' ? 'izquierdo' : 'derecho'}
                   </Text>
                 </View>
+              ) : (
+                <TouchableOpacity
+                  style={styles.cameraButton}
+                  onPress={handleCameraCapture}
+                  disabled={capturing}
+                >
+                  {capturing ? (
+                    <ActivityIndicator size="large" color={colors.primary} />
+                  ) : (
+                    <>
+                      <Text style={styles.cameraIcon}>📷</Text>
+                      <Text style={styles.cameraText}>
+                        Toque para abrir la cámara
+                      </Text>
+                      <Text style={styles.cameraHint}>
+                        Centre la huella del participante{'\n'}en el encuadre cuadrado
+                      </Text>
+                    </>
+                  )}
+                </TouchableOpacity>
               )}
             </View>
-          </View>
+          ) : (
+            // ── Modo táctil ──
+            <View style={styles.touchArea}>
+              <View style={styles.captureCircleOuter}>
+                <View style={styles.captureCircle}>
+                  <SignatureCanvas
+                    ref={signatureRef}
+                    onOK={handleTouchOK}
+                    onBegin={handleBegin}
+                    onEmpty={() => setHasTouch(false)}
+                    webStyle={webStyle}
+                    backgroundColor="#F5F5F5"
+                    penColor="#333333"
+                    minWidth={4}
+                    maxWidth={8}
+                    dotSize={6}
+                    style={styles.canvas}
+                  />
+
+                  {!hasTouch && (
+                    <View style={styles.guideOverlay} pointerEvents="none">
+                      <Text style={styles.guideIcon}>👆</Text>
+                      <Text style={styles.guideText}>
+                        Coloque su{'\n'}pulgar aquí
+                      </Text>
+                    </View>
+                  )}
+                </View>
+              </View>
+            </View>
+          )}
 
           <Text style={styles.handIndicator}>
             Pulgar {selectedHand === 'left' ? 'izquierdo' : 'derecho'}
           </Text>
         </View>
 
-        {/* Instrucciones */}
+        {/* Instrucciones según método */}
         <View style={styles.instructions}>
-          <Text style={styles.instructionText}>
-            1. Seleccione la mano correspondiente
-          </Text>
-          <Text style={styles.instructionText}>
-            2. Presione firmemente el pulgar en el circulo
-          </Text>
-          <Text style={styles.instructionText}>
-            3. Mantenga 2-3 segundos sin mover
-          </Text>
-          <Text style={styles.instructionText}>
-            4. Presione "Capturar" para guardar
+          {captureMethod === 'camera' ? (
+            <>
+              <Text style={styles.instructionText}>
+                1. Seleccione la mano correspondiente
+              </Text>
+              <Text style={styles.instructionText}>
+                2. Abra la cámara y centre la huella del participante
+              </Text>
+              <Text style={styles.instructionText}>
+                3. Asegúrese de buena iluminación y enfoque
+              </Text>
+              <Text style={styles.instructionText}>
+                4. Recorte para centrar la huella y confirme
+              </Text>
+            </>
+          ) : (
+            <>
+              <Text style={styles.instructionText}>
+                1. Seleccione la mano correspondiente
+              </Text>
+              <Text style={styles.instructionText}>
+                2. Presione firmemente el pulgar en el círculo
+              </Text>
+              <Text style={styles.instructionText}>
+                3. Mantenga 2-3 segundos sin mover
+              </Text>
+              <Text style={styles.instructionText}>
+                4. Presione "Capturar" para guardar
+              </Text>
+            </>
+          )}
+        </View>
+
+        {/* Nota de evidencia */}
+        <View style={styles.evidenceNote}>
+          <Text style={styles.evidenceNoteText}>
+            La imagen quedará disponible como evidencia y para la generación de actas
           </Text>
         </View>
 
-        {/* Botones de accion */}
+        {/* Botones de acción */}
         <View style={styles.actions}>
-          <TouchableOpacity style={styles.cancelButton} onPress={onCancel}>
+          <TouchableOpacity style={styles.cancelButton} onPress={handleCancel}>
             <Text style={styles.cancelButtonText}>Cancelar</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.clearButton} onPress={handleClear}>
-            <Text style={styles.clearButtonText}>Limpiar</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.saveButton, !hasTouch && styles.saveButtonDisabled]}
-            onPress={handleConfirm}
-            disabled={!hasTouch}
-          >
-            <Text style={styles.saveButtonText}>Capturar</Text>
-          </TouchableOpacity>
+
+          {captureMethod === 'touch' && (
+            <>
+              <TouchableOpacity style={styles.clearButton} onPress={handleClear}>
+                <Text style={styles.clearButtonText}>Limpiar</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.saveButton, !hasTouch && styles.saveButtonDisabled]}
+                onPress={handleConfirmTouch}
+                disabled={!hasTouch}
+              >
+                <Text style={styles.saveButtonText}>Capturar</Text>
+              </TouchableOpacity>
+            </>
+          )}
+
+          {captureMethod === 'camera' && previewUri && (
+            <TouchableOpacity style={styles.clearButton} onPress={handleClear}>
+              <Text style={styles.clearButtonText}>Repetir</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </View>
     </Modal>
@@ -243,11 +520,48 @@ const styles = StyleSheet.create({
     color: colors.textOnPrimary + 'CC',
     marginTop: spacing.xs,
   },
+  // ── Selector de método ──
+  methodSelector: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  methodButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.md,
+    borderRadius: borderRadius.full,
+    borderWidth: 2,
+    borderColor: colors.border,
+    gap: spacing.xs,
+  },
+  methodButtonActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primaryLight + '15',
+  },
+  methodIcon: {
+    fontSize: 18,
+  },
+  methodLabel: {
+    fontSize: fontSize.body,
+    color: colors.textSecondary,
+    fontWeight: '500',
+  },
+  methodLabelActive: {
+    color: colors.primary,
+    fontWeight: '600',
+  },
+  // ── Selector de mano ──
   handSelector: {
     flexDirection: 'row',
     justifyContent: 'center',
     gap: spacing.md,
-    paddingVertical: spacing.md,
+    paddingVertical: spacing.sm,
     backgroundColor: colors.surface,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
@@ -255,7 +569,7 @@ const styles = StyleSheet.create({
   handButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: spacing.sm,
+    paddingVertical: spacing.xs,
     paddingHorizontal: spacing.lg,
     borderRadius: borderRadius.full,
     borderWidth: 2,
@@ -278,11 +592,66 @@ const styles = StyleSheet.create({
     color: colors.primary,
     fontWeight: '600',
   },
+  // ── Área de captura ──
   captureArea: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  // Cámara
+  cameraArea: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    flex: 1,
+  },
+  cameraButton: {
+    width: CAPTURE_SIZE + 40,
+    height: CAPTURE_SIZE + 40,
+    borderRadius: borderRadius.lg,
+    borderWidth: 3,
+    borderColor: colors.primary,
+    borderStyle: 'dashed',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surface,
+  },
+  cameraIcon: {
+    fontSize: 48,
+    marginBottom: spacing.sm,
+  },
+  cameraText: {
+    fontSize: fontSize.body,
+    color: colors.primary,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  cameraHint: {
+    fontSize: fontSize.caption,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    marginTop: spacing.xs,
+  },
+  previewContainer: {
+    alignItems: 'center',
+  },
+  previewImage: {
+    width: CAPTURE_SIZE + 40,
+    height: CAPTURE_SIZE + 40,
+    borderRadius: borderRadius.lg,
+    borderWidth: 2,
+    borderColor: colors.success,
+  },
+  previewLabel: {
+    fontSize: fontSize.body,
+    color: colors.success,
+    fontWeight: '600',
+    marginTop: spacing.sm,
+  },
+  // Táctil
+  touchArea: {
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   captureCircleOuter: {
     width: CAPTURE_SIZE + 12,
@@ -331,17 +700,34 @@ const styles = StyleSheet.create({
     fontSize: fontSize.body,
     color: colors.primary,
     fontWeight: '600',
-    marginTop: spacing.md,
+    marginTop: spacing.sm,
   },
+  // ── Instrucciones ──
   instructions: {
     paddingHorizontal: spacing.lg,
-    paddingBottom: spacing.md,
+    paddingBottom: spacing.xs,
     gap: spacing.xs,
   },
   instructionText: {
     fontSize: fontSize.caption,
     color: colors.textSecondary,
   },
+  // ── Nota de evidencia ──
+  evidenceNote: {
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.sm,
+    padding: spacing.sm,
+    backgroundColor: colors.primary + '15',
+    borderRadius: borderRadius.md,
+    borderLeftWidth: 3,
+    borderLeftColor: colors.primary,
+  },
+  evidenceNoteText: {
+    fontSize: fontSize.caption,
+    color: colors.primary,
+    fontStyle: 'italic',
+  },
+  // ── Botones ──
   actions: {
     flexDirection: 'row',
     padding: spacing.md,

@@ -140,7 +140,7 @@ export default function EvidenceViewerScreen() {
       <View style={styles.footerOverlay}>
         <View style={styles.footerContent}>
           <Text style={styles.typeLabel}>
-            {current?.type === 'photo' ? '📷 Foto' : '🎥 Video'}
+            {current?.type === 'fingerprint' ? '👆 Huella' : current?.type === 'photo' ? '📷 Foto' : '🎥 Video'}
           </Text>
           <View
             style={[
