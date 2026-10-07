@@ -20,6 +20,8 @@ import {
   StyleSheet,
   Platform,
   Dimensions,
+  Alert,
+  ActivityIndicator,
 } from 'react-native';
 import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import {
@@ -30,6 +32,7 @@ import {
   getHourlyDistribution,
 } from '../db/database';
 import { useAuthStore } from '../store/authStore';
+import { exportRecords, shareExportFile } from '../utils/exportData';
 import { colors, spacing, fontSize, borderRadius } from '../ui/theme';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
@@ -256,16 +259,13 @@ export default function StatsScreen() {
 
   const dailyActivity = useMemo(() => {
     void refreshKey;
-    // Calcular dias entre las fechas
-    const diffMs = dateTo.getTime() - dateFrom.getTime();
-    const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
-    return getDailyActivity(Math.max(7, diffDays));
+    return getDailyActivity(formatDate(dateFrom), formatDate(dateTo));
   }, [dateFrom, dateTo, refreshKey]);
 
   const hourlyData = useMemo(() => {
     void refreshKey;
-    return getHourlyDistribution();
-  }, [refreshKey]);
+    return getHourlyDistribution(formatDate(dateFrom), formatDate(dateTo));
+  }, [dateFrom, dateTo, refreshKey]);
 
   const onChangeFrom = (_event: DateTimePickerEvent, selected?: Date) => {
     setShowPickerFrom(Platform.OS === 'ios');
@@ -285,6 +285,50 @@ export default function StatsScreen() {
     globalStats.total > 0
       ? Math.round((globalStats.synced / globalStats.total) * 100)
       : 0;
+
+  const [exporting, setExporting] = useState(false);
+
+  const handleGenerateReport = useCallback(
+    async (format: 'csv' | 'json') => {
+      setExporting(true);
+      try {
+        const result = await exportRecords({
+          format,
+          fromDate: formatDate(dateFrom),
+          toDate: formatDate(dateTo),
+          status: 'synced',
+        });
+
+        if (result.recordCount === 0) {
+          Alert.alert(
+            'Sin datos',
+            'No hay registros enviados en el periodo seleccionado.',
+          );
+          return;
+        }
+
+        Alert.alert(
+          'Informe generado',
+          `Se exportaron ${result.recordCount} registros enviados.\n\nArchivo: ${result.fileName}`,
+          [
+            { text: 'Cerrar', style: 'cancel' },
+            {
+              text: 'Compartir',
+              onPress: () => shareExportFile(result.filePath),
+            },
+          ],
+        );
+      } catch (err: any) {
+        Alert.alert(
+          'Error',
+          `No se pudo generar el informe: ${err.message ?? 'Error desconocido'}`,
+        );
+      } finally {
+        setExporting(false);
+      }
+    },
+    [dateFrom, dateTo],
+  );
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
@@ -533,6 +577,45 @@ export default function StatsScreen() {
           </View>
         ))
       )}
+
+      {/* Generar informe */}
+      <Text style={styles.sectionTitle}>Generar informe</Text>
+      <View style={styles.reportCard}>
+        <Text style={styles.reportDescription}>
+          Exportar registros enviados del {displayDate(dateFrom)} al{' '}
+          {displayDate(dateTo)}
+        </Text>
+        <View style={styles.reportActions}>
+          <TouchableOpacity
+            style={[styles.reportBtn, exporting && styles.buttonDisabled]}
+            onPress={() => handleGenerateReport('csv')}
+            disabled={exporting}
+          >
+            {exporting ? (
+              <ActivityIndicator size="small" color={colors.textOnPrimary} />
+            ) : (
+              <>
+                <Text style={styles.reportBtnIcon}>📄</Text>
+                <Text style={styles.reportBtnText}>CSV</Text>
+              </>
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.reportBtn, styles.reportBtnJson, exporting && styles.buttonDisabled]}
+            onPress={() => handleGenerateReport('json')}
+            disabled={exporting}
+          >
+            {exporting ? (
+              <ActivityIndicator size="small" color={colors.primary} />
+            ) : (
+              <>
+                <Text style={styles.reportBtnIcon}>📋</Text>
+                <Text style={[styles.reportBtnText, { color: colors.primary }]}>JSON</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
+      </View>
 
       {/* Boton actualizar */}
       <TouchableOpacity style={styles.refreshButton} onPress={refresh}>
@@ -968,6 +1051,54 @@ const styles = StyleSheet.create({
     fontSize: fontSize.body,
     color: colors.textSecondary,
     textAlign: 'center',
+  },
+
+  // Report
+  reportCard: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing.lg,
+    elevation: 1,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+  },
+  reportDescription: {
+    fontSize: fontSize.caption,
+    color: colors.textSecondary,
+    marginBottom: spacing.md,
+    textAlign: 'center',
+  },
+  reportActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  reportBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    gap: spacing.xs,
+  },
+  reportBtnJson: {
+    backgroundColor: 'transparent',
+    borderWidth: 1.5,
+    borderColor: colors.primary,
+  },
+  reportBtnIcon: {
+    fontSize: 16,
+  },
+  reportBtnText: {
+    color: colors.textOnPrimary,
+    fontSize: fontSize.body,
+    fontWeight: '600',
+  },
+  buttonDisabled: {
+    opacity: 0.6,
   },
 
   // Refresh

@@ -21,8 +21,10 @@ export interface ExportOptions {
   projectId?: number;
   templateId?: number;
   status?: string;
-  /** Incluir solo registros creados despues de esta fecha */
+  /** Incluir solo registros creados despues de esta fecha (YYYY-MM-DD) */
   fromDate?: string;
+  /** Incluir solo registros creados hasta esta fecha (YYYY-MM-DD) */
+  toDate?: string;
 }
 
 export interface ExportResult {
@@ -39,12 +41,11 @@ export async function exportRecords(options: ExportOptions): Promise<ExportResul
     projectId: options.projectId,
     templateId: options.templateId,
     status: options.status,
+    fromDate: options.fromDate,
+    toDate: options.toDate,
   });
 
-  // Filtrar por fecha si se especifica
-  const filtered = options.fromDate
-    ? records.filter((r) => r.created_at >= options.fromDate!)
-    : records;
+  const filtered = records;
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
   const templateName = options.templateId

@@ -634,14 +634,30 @@ export function getParticipantCoverageStats(projectId: number): {
   };
 }
 
-/** Actividad diaria — registros por dia en los ultimos N dias */
-export function getDailyActivity(days: number = 14): {
+/** Actividad diaria — registros por dia en un rango de fechas */
+export function getDailyActivity(
+  fromDate?: string,
+  toDate?: string,
+  days: number = 14,
+): {
   date: string;
   count: number;
   synced: number;
   pending: number;
 }[] {
   const db = getDatabase();
+
+  let whereClause: string;
+  let params: (string | number)[];
+
+  if (fromDate && toDate) {
+    whereClause = `WHERE created_at >= ? AND created_at < datetime(?, '+1 day')`;
+    params = [fromDate, toDate];
+  } else {
+    whereClause = `WHERE created_at >= date('now', ? || ' days')`;
+    params = [`-${days}`];
+  }
+
   const rows = db.getAllSync<{
     day: string;
     total: number;
@@ -654,10 +670,10 @@ export function getDailyActivity(days: number = 14): {
        SUM(CASE WHEN status = 'synced' THEN 1 ELSE 0 END) as synced,
        SUM(CASE WHEN status IN ('pending', 'syncing', 'error') THEN 1 ELSE 0 END) as pending
      FROM queued_records
-     WHERE created_at >= date('now', ? || ' days')
+     ${whereClause}
      GROUP BY date(created_at)
      ORDER BY day ASC`,
-    [`-${days}`],
+    params,
   );
 
   return rows.map((r) => ({
@@ -669,14 +685,27 @@ export function getDailyActivity(days: number = 14): {
 }
 
 /** Productividad — registros por hora del dia */
-export function getHourlyDistribution(): { hour: number; count: number }[] {
+export function getHourlyDistribution(
+  fromDate?: string,
+  toDate?: string,
+): { hour: number; count: number }[] {
   const db = getDatabase();
+
+  let dateFilter = '';
+  const params: string[] = [];
+
+  if (fromDate && toDate) {
+    dateFilter = ` AND created_at >= ? AND created_at < datetime(?, '+1 day')`;
+    params.push(fromDate, toDate);
+  }
+
   const rows = db.getAllSync<{ h: number; cnt: number }>(
     `SELECT CAST(strftime('%H', created_at) AS INTEGER) as h, COUNT(*) as cnt
      FROM queued_records
-     WHERE status != 'draft'
+     WHERE status != 'draft'${dateFilter}
      GROUP BY h
      ORDER BY h ASC`,
+    params,
   );
   return rows.map((r) => ({ hour: r.h, count: r.cnt }));
 }
@@ -705,6 +734,8 @@ export function listAllRecords(filters?: {
   projectId?: number;
   templateId?: number;
   status?: string;
+  fromDate?: string;
+  toDate?: string;
 }): {
   local_id: string;
   project_id: number;
@@ -734,6 +765,14 @@ export function listAllRecords(filters?: {
   if (filters?.status) {
     query += ` AND status = ?`;
     params.push(filters.status);
+  }
+  if (filters?.fromDate) {
+    query += ` AND created_at >= ?`;
+    params.push(filters.fromDate);
+  }
+  if (filters?.toDate) {
+    query += ` AND created_at < datetime(?, '+1 day')`;
+    params.push(filters.toDate);
   }
 
   query += ` ORDER BY created_at DESC`;
