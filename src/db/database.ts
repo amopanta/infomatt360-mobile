@@ -111,6 +111,33 @@ function initializeDatabase(database: SQLite.SQLiteDatabase): void {
     CREATE INDEX IF NOT EXISTS idx_evidence_uploaded ON evidence(uploaded);
   `);
 
+  // Cache de participantes para vista 360
+  database.execSync(`
+    CREATE TABLE IF NOT EXISTS participants (
+      id INTEGER PRIMARY KEY,
+      project_id INTEGER NOT NULL,
+      full_name TEXT NOT NULL,
+      document_type TEXT NOT NULL DEFAULT 'CC',
+      document_number TEXT NOT NULL,
+      code TEXT NOT NULL,
+      phone TEXT,
+      email TEXT,
+      address TEXT,
+      extra_json TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT,
+      downloaded_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(project_id, document_number)
+    );
+  `);
+  database.execSync(`
+    CREATE INDEX IF NOT EXISTS idx_participants_project ON participants(project_id);
+  `);
+  database.execSync(`
+    CREATE INDEX IF NOT EXISTS idx_participants_search
+      ON participants(project_id, full_name, document_number, code);
+  `);
+
   // Registro local de errores y crashes
   database.execSync(`
     CREATE TABLE IF NOT EXISTS crash_logs (
@@ -801,4 +828,153 @@ export function getCrashLogCount(): number {
 export function clearCrashLogs(): void {
   const db = getDatabase();
   db.runSync(`DELETE FROM crash_logs`);
+}
+
+// ── Operaciones de participantes (Vista 360) ───────────────────────
+
+/** Guarda o actualiza un participante en cache local */
+export function cacheParticipant(p: {
+  id: number;
+  projectId: number;
+  fullName: string;
+  documentType: string;
+  documentNumber: string;
+  code: string;
+  phone?: string;
+  email?: string;
+  address?: string;
+  extraJson?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}): void {
+  const db = getDatabase();
+  db.runSync(
+    `INSERT OR REPLACE INTO participants
+       (id, project_id, full_name, document_type, document_number, code,
+        phone, email, address, extra_json, created_at, updated_at, downloaded_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+    [
+      p.id,
+      p.projectId,
+      p.fullName,
+      p.documentType,
+      p.documentNumber,
+      p.code,
+      p.phone ?? null,
+      p.email ?? null,
+      p.address ?? null,
+      p.extraJson ?? null,
+      p.createdAt ?? new Date().toISOString(),
+      p.updatedAt ?? null,
+    ],
+  );
+}
+
+/** Lista participantes de un proyecto con búsqueda opcional */
+export function getCachedParticipants(
+  projectId: number,
+  search?: string,
+): {
+  id: number;
+  project_id: number;
+  full_name: string;
+  document_type: string;
+  document_number: string;
+  code: string;
+  phone: string | null;
+  email: string | null;
+  address: string | null;
+}[] {
+  const db = getDatabase();
+
+  if (search && search.trim()) {
+    const q = `%${search.trim()}%`;
+    return db.getAllSync(
+      `SELECT id, project_id, full_name, document_type, document_number,
+              code, phone, email, address
+       FROM participants
+       WHERE project_id = ?
+         AND (full_name LIKE ? OR document_number LIKE ? OR code LIKE ?)
+       ORDER BY full_name COLLATE NOCASE
+       LIMIT 200`,
+      [projectId, q, q, q],
+    ) as any;
+  }
+
+  return db.getAllSync(
+    `SELECT id, project_id, full_name, document_type, document_number,
+            code, phone, email, address
+     FROM participants
+     WHERE project_id = ?
+     ORDER BY full_name COLLATE NOCASE
+     LIMIT 200`,
+    [projectId],
+  ) as any;
+}
+
+/** Obtiene un participante por ID */
+export function getCachedParticipant(participantId: number): {
+  id: number;
+  project_id: number;
+  full_name: string;
+  document_type: string;
+  document_number: string;
+  code: string;
+  phone: string | null;
+  email: string | null;
+  address: string | null;
+  extra_json: string | null;
+} | null {
+  const db = getDatabase();
+  return db.getFirstSync(
+    `SELECT id, project_id, full_name, document_type, document_number,
+            code, phone, email, address, extra_json
+     FROM participants WHERE id = ?`,
+    [participantId],
+  ) as any;
+}
+
+/** Obtiene los formularios asociados a un participante con estado de aplicación */
+export function getParticipantFormStatus(
+  participantId: number,
+  projectId: number,
+): {
+  template_id: number;
+  form_name: string;
+  applied: boolean;
+  applied_at: string | null;
+  record_local_id: string | null;
+  record_status: string | null;
+}[] {
+  const db = getDatabase();
+
+  // Obtener todos los formularios cerrados (que tienen registros con participant_id)
+  // y cruzar con los registros del participante
+  return db.getAllSync(
+    `SELECT
+       ft.id as template_id,
+       ft.name as form_name,
+       CASE WHEN qr.local_id IS NOT NULL THEN 1 ELSE 0 END as applied,
+       qr.created_at as applied_at,
+       qr.local_id as record_local_id,
+       qr.status as record_status
+     FROM form_templates ft
+     LEFT JOIN queued_records qr
+       ON qr.template_id = ft.id
+       AND qr.participant_id = ?
+       AND qr.status != 'draft'
+     WHERE ft.project_id = ?
+     ORDER BY ft.name`,
+    [participantId, projectId],
+  ) as any;
+}
+
+/** Conteo de participantes en cache por proyecto */
+export function getParticipantCount(projectId: number): number {
+  const db = getDatabase();
+  const row = db.getFirstSync<{ count: number }>(
+    `SELECT COUNT(*) as count FROM participants WHERE project_id = ?`,
+    [projectId],
+  );
+  return row?.count ?? 0;
 }

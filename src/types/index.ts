@@ -215,6 +215,38 @@ export interface ConflictRecord {
   detected_at: string;
 }
 
+// ─── Participantes (Vista 360) ──────────────────────────────────────
+
+export interface Participant {
+  id: number;
+  project_id: number;
+  full_name: string;
+  document_type: string;       // CC, TI, CE, etc.
+  document_number: string;     // Numero de cedula/documento
+  code: string;                // Codigo interno (P-0001)
+  phone?: string;
+  email?: string;
+  address?: string;
+  extra_json?: string;         // Campos adicionales del backend
+  created_at: string;
+  updated_at?: string;
+}
+
+/** Relacion participante ↔ formulario con estado de aplicacion */
+export interface ParticipantForm {
+  participant_id: number;
+  template_id: number;
+  form_name: string;
+  /** Si ya existe un registro para este participante+formulario */
+  applied: boolean;
+  /** Fecha de aplicacion (si applied) */
+  applied_at?: string;
+  /** local_id del registro asociado (si applied) */
+  record_local_id?: string;
+  /** Status del registro asociado */
+  record_status?: QueueStatus;
+}
+
 // ─── GPS ─────────────────────────────────────────────────────────────
 
 export interface GpsCoordinate {

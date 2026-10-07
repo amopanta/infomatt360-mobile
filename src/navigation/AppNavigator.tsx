@@ -31,6 +31,8 @@ import EvidenceViewerScreen from '../evidence/screens/EvidenceViewerScreen';
 import FormEditScreen from '../forms/screens/FormEditScreen';
 import RecordDetailScreen from '../forms/screens/RecordDetailScreen';
 import RecordsMapScreen from '../map/RecordsMapScreen';
+import ParticipantListScreen from '../participants/screens/ParticipantListScreen';
+import ParticipantDetailScreen from '../participants/screens/ParticipantDetailScreen';
 import SyncStatusScreen from '../sync/SyncStatusScreen';
 import ConflictResolutionScreen from '../sync/ConflictResolutionScreen';
 import ExportScreen from '../sync/ExportScreen';
@@ -48,6 +50,7 @@ const Tab = createBottomTabNavigator();
 function TabIcon({ label, focused }: { label: string; focused: boolean }) {
   const icons: Record<string, string> = {
     Formularios: '📋',
+    Participantes: '👥',
     Borradores: '📂',
     Mapa: '🗺️',
     Sync: '🔄',
@@ -126,6 +129,16 @@ function MainTabs() {
           headerShown: false,
           tabBarIcon: ({ focused }) => (
             <TabIcon label="Formularios" focused={focused} />
+          ),
+        }}
+      />
+      <Tab.Screen
+        name="ParticipantsTab"
+        component={ParticipantsStack}
+        options={{
+          headerShown: false,
+          tabBarIcon: ({ focused }) => (
+            <TabIcon label="Participantes" focused={focused} />
           ),
         }}
       />
@@ -220,6 +233,55 @@ function FormsStack() {
         name="DocumentScanner"
         component={DocumentScannerScreen}
         options={{ title: 'Escanear documento' }}
+      />
+    </Stack.Navigator>
+  );
+}
+
+// ── Stack de participantes (Vista 360) ──────────────────────────────
+
+function ParticipantsStack() {
+  return (
+    <Stack.Navigator
+      screenOptions={{
+        headerStyle: { backgroundColor: colors.primary },
+        headerTintColor: colors.textOnPrimary,
+        headerTitleStyle: { fontWeight: '600' },
+      }}
+    >
+      <Stack.Screen
+        name="ParticipantList"
+        component={ParticipantListScreen}
+        options={{ title: 'Participantes' }}
+      />
+      <Stack.Screen
+        name="ParticipantDetail"
+        component={ParticipantDetailScreen}
+        options={{ title: 'Participante' }}
+      />
+      <Stack.Screen
+        name="FormCapture"
+        component={FormCaptureScreen}
+        options={{ title: 'Captura' }}
+      />
+      <Stack.Screen
+        name="RecordDetail"
+        component={RecordDetailScreen}
+        options={{ title: 'Respuestas enviadas' }}
+      />
+      <Stack.Screen
+        name="EvidenceCapture"
+        component={EvidenceCaptureScreen}
+        options={{ title: 'Evidencias' }}
+      />
+      <Stack.Screen
+        name="EvidenceViewer"
+        component={EvidenceViewerScreen}
+        options={{
+          title: '',
+          headerShown: false,
+          animation: 'fade',
+        }}
       />
     </Stack.Navigator>
   );
