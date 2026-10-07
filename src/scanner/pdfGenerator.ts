@@ -246,19 +246,57 @@ function stringToBytes(str: string): Uint8Array {
   return new Uint8Array(bytes);
 }
 
+/**
+ * Convierte base64 a Uint8Array sin usar atob (compatible con Hermes).
+ */
 function base64ToBytes(base64: string): Uint8Array {
-  const binaryStr = atob(base64);
-  const bytes = new Uint8Array(binaryStr.length);
-  for (let i = 0; i < binaryStr.length; i++) {
-    bytes[i] = binaryStr.charCodeAt(i);
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const lookup = new Uint8Array(256);
+  for (let i = 0; i < chars.length; i++) {
+    lookup[chars.charCodeAt(i)] = i;
   }
+
+  // Remove padding
+  let len = base64.length;
+  let bufferLength = Math.floor(len * 3 / 4);
+  if (base64[len - 1] === '=') bufferLength--;
+  if (base64[len - 2] === '=') bufferLength--;
+
+  const bytes = new Uint8Array(bufferLength);
+  let p = 0;
+
+  for (let i = 0; i < len; i += 4) {
+    const e1 = lookup[base64.charCodeAt(i)];
+    const e2 = lookup[base64.charCodeAt(i + 1)];
+    const e3 = lookup[base64.charCodeAt(i + 2)];
+    const e4 = lookup[base64.charCodeAt(i + 3)];
+
+    bytes[p++] = (e1 << 2) | (e2 >> 4);
+    if (p < bufferLength) bytes[p++] = ((e2 & 15) << 4) | (e3 >> 2);
+    if (p < bufferLength) bytes[p++] = ((e3 & 3) << 6) | (e4 & 63);
+  }
+
   return bytes;
 }
 
+/**
+ * Convierte Uint8Array a base64 sin usar btoa (compatible con Hermes).
+ */
 function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let result = '';
+  const len = bytes.length;
+
+  for (let i = 0; i < len; i += 3) {
+    const b1 = bytes[i];
+    const b2 = i + 1 < len ? bytes[i + 1] : 0;
+    const b3 = i + 2 < len ? bytes[i + 2] : 0;
+
+    result += chars[b1 >> 2];
+    result += chars[((b1 & 3) << 4) | (b2 >> 4)];
+    result += i + 1 < len ? chars[((b2 & 15) << 2) | (b3 >> 6)] : '=';
+    result += i + 2 < len ? chars[b3 & 63] : '=';
   }
-  return btoa(binary);
+
+  return result;
 }

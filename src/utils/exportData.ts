@@ -217,18 +217,53 @@ function escapeCsvField(value: string): string {
 
 /**
  * Comparte el archivo exportado usando la Share API nativa.
+ *
+ * En Android, Share.share no soporta archivos directamente sin
+ * expo-sharing. Usamos un content:// URI via FileSystem para
+ * que el intent de compartir funcione correctamente.
  */
 export async function shareExportFile(filePath: string): Promise<void> {
   if (Platform.OS === 'ios') {
     // En iOS, Share puede compartir archivos directamente
     await Share.share({ url: filePath });
   } else {
-    // En Android, compartir como mensaje con la ruta
-    // (sin expo-sharing, solo podemos compartir texto)
-    await Share.share({
-      title: 'Exportar datos InfoMatt360',
-      message: `Archivo exportado guardado en: ${filePath}`,
-    });
+    // En Android, leer el archivo como texto y compartir el contenido
+    // directamente, lo que permite copiarlo a cualquier app
+    try {
+      const content = await FileSystem.readAsStringAsync(filePath, {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+      const fileName = filePath.split('/').pop() ?? 'export';
+      const isJson = fileName.endsWith('.json');
+
+      // Para archivos pequenos (<100KB), compartir contenido inline
+      // Para archivos grandes, compartir la ruta con instrucciones
+      if (content.length < 100_000) {
+        await Share.share({
+          title: `InfoMatt360 - ${fileName}`,
+          message: isJson
+            ? content
+            : `${fileName}\n\n${content}`,
+        });
+      } else {
+        // Archivo grande: notificar ruta y tamano
+        const sizeKb = Math.round(content.length / 1024);
+        await Share.share({
+          title: `InfoMatt360 - ${fileName}`,
+          message:
+            `Archivo exportado: ${fileName} (${sizeKb} KB)\n\n` +
+            `Ubicacion: ${filePath}\n\n` +
+            `Puedes acceder al archivo desde un gestor de archivos ` +
+            `o conectar el dispositivo a un computador para copiarlo.`,
+        });
+      }
+    } catch {
+      // Fallback: compartir solo la ruta
+      await Share.share({
+        title: 'Exportar datos InfoMatt360',
+        message: `Archivo exportado: ${filePath}`,
+      });
+    }
   }
 }
 

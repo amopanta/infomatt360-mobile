@@ -12,7 +12,7 @@
  * y boton para navegar al detalle del registro.
  */
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -175,10 +175,24 @@ export default function RecordsMapScreen() {
   const [loading, setLoading] = useState(true);
   const [mapHtml, setMapHtml] = useState('');
   const [filter, setFilter] = useState<'all' | 'pending' | 'synced' | 'error'>('all');
+  const [allGeoRecords, setAllGeoRecords] = useState<{ record: MapRecord; gps: GpsData }[]>([]);
+  const [noGpsCount, setNoGpsCount] = useState(0);
 
   const loadData = useCallback(() => {
     setLoading(true);
+
+    // Cargar todos los registros con GPS una sola vez
     const all = loadGeoRecords();
+    setAllGeoRecords(all);
+
+    // Contar registros sin GPS una sola vez
+    const db = getDatabase();
+    const row = db.getFirstSync(
+      `SELECT COUNT(*) as cnt FROM queued_records WHERE gps_json IS NULL OR gps_json = ''`,
+    ) as { cnt: number } | null;
+    setNoGpsCount(row?.cnt ?? 0);
+
+    // Aplicar filtro
     const filtered =
       filter === 'all'
         ? all
@@ -205,14 +219,7 @@ export default function RecordsMapScreen() {
     }
   };
 
-  const totalRecords = loadGeoRecords().length;
-  const noGpsRecords = (() => {
-    const db = getDatabase();
-    const row = db.getFirstSync(
-      `SELECT COUNT(*) as cnt FROM queued_records WHERE gps_json IS NULL OR gps_json = ''`,
-    ) as { cnt: number } | null;
-    return row?.cnt ?? 0;
-  })();
+  const noGpsRecords = noGpsCount;
 
   const filterButtons: { key: typeof filter; label: string; color: string }[] = [
     { key: 'all', label: 'Todos', color: colors.primary },
