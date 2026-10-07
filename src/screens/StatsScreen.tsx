@@ -3,6 +3,9 @@
  *
  * Muestra:
  *   - Totales globales (registros, enviados, pendientes, errores)
+ *   - Cobertura de participantes (con barra visual)
+ *   - Actividad diaria (mini grafico de barras)
+ *   - Distribucion por hora del dia
  *   - Filtro por rango de fechas (inicio y fin)
  *   - Desglose por formulario con barras de progreso
  *   - Cantidad de evidencias por formulario
@@ -16,10 +19,20 @@ import {
   TouchableOpacity,
   StyleSheet,
   Platform,
+  Dimensions,
 } from 'react-native';
 import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
-import { getStatsByTemplate, getGlobalStats } from '../db/database';
+import {
+  getStatsByTemplate,
+  getGlobalStats,
+  getParticipantCoverageStats,
+  getDailyActivity,
+  getHourlyDistribution,
+} from '../db/database';
+import { useAuthStore } from '../store/authStore';
 import { colors, spacing, fontSize, borderRadius } from '../ui/theme';
+
+const SCREEN_WIDTH = Dimensions.get('window').width;
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -36,6 +49,15 @@ function displayDate(date: Date): string {
     month: 'short',
     year: 'numeric',
   });
+}
+
+function shortDay(dateStr: string): string {
+  try {
+    const d = new Date(dateStr + 'T12:00:00');
+    return d.toLocaleDateString('es-CO', { day: '2-digit', month: 'short' });
+  } catch {
+    return dateStr.slice(5);
+  }
 }
 
 // ── Componentes auxiliares ─────────────────────────────────────────────
@@ -91,9 +113,118 @@ function ProgressBar({
   );
 }
 
+/** Mini grafico de barras para actividad diaria */
+function DailyChart({
+  data,
+}: {
+  data: { date: string; count: number; synced: number; pending: number }[];
+}) {
+  if (data.length === 0) {
+    return (
+      <View style={styles.chartEmpty}>
+        <Text style={styles.chartEmptyText}>Sin actividad en este periodo</Text>
+      </View>
+    );
+  }
+
+  const maxCount = Math.max(...data.map((d) => d.count), 1);
+  const chartHeight = 120;
+  const barWidth = Math.max(
+    12,
+    Math.min(28, (SCREEN_WIDTH - spacing.md * 4) / data.length - 4),
+  );
+
+  return (
+    <View style={styles.chartContainer}>
+      <View style={styles.chartBars}>
+        {data.map((day) => {
+          const height = (day.count / maxCount) * chartHeight;
+          const syncedH = day.count > 0 ? (day.synced / day.count) * height : 0;
+          const pendingH = height - syncedH;
+
+          return (
+            <View key={day.date} style={styles.chartBarGroup}>
+              <Text style={styles.chartBarCount}>
+                {day.count > 0 ? day.count : ''}
+              </Text>
+              <View style={[styles.chartBarWrapper, { height: chartHeight }]}>
+                <View style={{ flex: 1 }} />
+                <View style={{ height: pendingH, backgroundColor: colors.warning, width: barWidth, borderTopLeftRadius: pendingH > 0 && syncedH === 0 ? 3 : 0, borderTopRightRadius: pendingH > 0 && syncedH === 0 ? 3 : 0 }} />
+                <View style={{ height: syncedH, backgroundColor: colors.success, width: barWidth, borderTopLeftRadius: 3, borderTopRightRadius: 3 }} />
+              </View>
+              <Text style={styles.chartBarLabel} numberOfLines={1}>
+                {shortDay(day.date)}
+              </Text>
+            </View>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
+/** Distribucion por hora */
+function HourlyChart({
+  data,
+}: {
+  data: { hour: number; count: number }[];
+}) {
+  if (data.length === 0) return null;
+
+  // Llenar las 24 horas
+  const hours = Array.from({ length: 24 }, (_, i) => {
+    const found = data.find((d) => d.hour === i);
+    return { hour: i, count: found?.count ?? 0 };
+  });
+
+  const maxCount = Math.max(...hours.map((h) => h.count), 1);
+  const barHeight = 60;
+
+  // Solo mostrar horas con actividad + vecinas
+  const activeHours = hours.filter((h) => h.count > 0);
+  if (activeHours.length === 0) return null;
+
+  const minHour = Math.max(0, Math.min(...activeHours.map((h) => h.hour)) - 1);
+  const maxHour = Math.min(23, Math.max(...activeHours.map((h) => h.hour)) + 1);
+  const visibleHours = hours.slice(minHour, maxHour + 1);
+
+  return (
+    <View style={styles.hourlyContainer}>
+      <View style={styles.hourlyBars}>
+        {visibleHours.map((h) => {
+          const height = (h.count / maxCount) * barHeight;
+          return (
+            <View key={h.hour} style={styles.hourlyBarGroup}>
+              {h.count > 0 && (
+                <Text style={styles.hourlyCount}>{h.count}</Text>
+              )}
+              <View style={[styles.hourlyBarWrapper, { height: barHeight }]}>
+                <View style={{ flex: 1 }} />
+                <View
+                  style={{
+                    height,
+                    backgroundColor: colors.primary,
+                    width: 16,
+                    borderTopLeftRadius: 2,
+                    borderTopRightRadius: 2,
+                    opacity: 0.7 + (h.count / maxCount) * 0.3,
+                  }}
+                />
+              </View>
+              <Text style={styles.hourlyLabel}>{h.hour}h</Text>
+            </View>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
 // ── Pantalla principal ────────────────────────────────────────────────
 
 export default function StatsScreen() {
+  const { activeProjectId } = useAuthStore();
+
   // Default: last 30 days
   const [dateFrom, setDateFrom] = useState<Date>(() => {
     const d = new Date();
@@ -108,7 +239,7 @@ export default function StatsScreen() {
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   const globalStats = useMemo(() => {
-    void refreshKey; // dependency trigger
+    void refreshKey;
     return getGlobalStats(formatDate(dateFrom), formatDate(dateTo));
   }, [dateFrom, dateTo, refreshKey]);
 
@@ -116,6 +247,25 @@ export default function StatsScreen() {
     void refreshKey;
     return getStatsByTemplate(formatDate(dateFrom), formatDate(dateTo));
   }, [dateFrom, dateTo, refreshKey]);
+
+  const coverageStats = useMemo(() => {
+    void refreshKey;
+    if (!activeProjectId) return null;
+    return getParticipantCoverageStats(activeProjectId);
+  }, [activeProjectId, refreshKey]);
+
+  const dailyActivity = useMemo(() => {
+    void refreshKey;
+    // Calcular dias entre las fechas
+    const diffMs = dateTo.getTime() - dateFrom.getTime();
+    const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+    return getDailyActivity(Math.max(7, diffDays));
+  }, [dateFrom, dateTo, refreshKey]);
+
+  const hourlyData = useMemo(() => {
+    void refreshKey;
+    return getHourlyDistribution();
+  }, [refreshKey]);
 
   const onChangeFrom = (_event: DateTimePickerEvent, selected?: Date) => {
     setShowPickerFrom(Platform.OS === 'ios');
@@ -244,6 +394,81 @@ export default function StatsScreen() {
             </View>
           </View>
         </View>
+      )}
+
+      {/* Cobertura de participantes */}
+      {coverageStats && coverageStats.totalParticipants > 0 && (
+        <>
+          <Text style={styles.sectionTitle}>Cobertura de participantes</Text>
+          <View style={styles.coverageCard}>
+            <View style={styles.coverageHeader}>
+              <View>
+                <Text style={styles.coverageMainValue}>
+                  {coverageStats.coveragePercent}%
+                </Text>
+                <Text style={styles.coverageSubtext}>
+                  {coverageStats.withRecords} de {coverageStats.totalParticipants} participantes
+                </Text>
+              </View>
+              <View style={styles.coverageCircle}>
+                <View
+                  style={[
+                    styles.coverageCircleFill,
+                    {
+                      height: `${coverageStats.coveragePercent}%`,
+                      backgroundColor:
+                        coverageStats.coveragePercent >= 80
+                          ? colors.success
+                          : coverageStats.coveragePercent >= 50
+                            ? colors.warning
+                            : colors.error,
+                    },
+                  ]}
+                />
+              </View>
+            </View>
+            <View style={styles.coverageDetails}>
+              <View style={styles.coverageDetailItem}>
+                <View style={[styles.coverageDetailDot, { backgroundColor: colors.success }]} />
+                <Text style={styles.coverageDetailText}>
+                  Con registros: {coverageStats.withRecords}
+                </Text>
+              </View>
+              <View style={styles.coverageDetailItem}>
+                <View style={[styles.coverageDetailDot, { backgroundColor: colors.textSecondary }]} />
+                <Text style={styles.coverageDetailText}>
+                  Sin registros: {coverageStats.withoutRecords}
+                </Text>
+              </View>
+            </View>
+          </View>
+        </>
+      )}
+
+      {/* Actividad diaria */}
+      <Text style={styles.sectionTitle}>Actividad diaria</Text>
+      <View style={styles.chartCard}>
+        <DailyChart data={dailyActivity} />
+        <View style={styles.chartLegend}>
+          <View style={styles.legendItem}>
+            <View style={[styles.legendDot, { backgroundColor: colors.success }]} />
+            <Text style={styles.legendText}>Enviados</Text>
+          </View>
+          <View style={styles.legendItem}>
+            <View style={[styles.legendDot, { backgroundColor: colors.warning }]} />
+            <Text style={styles.legendText}>Pendientes</Text>
+          </View>
+        </View>
+      </View>
+
+      {/* Distribucion por hora */}
+      {hourlyData.length > 0 && (
+        <>
+          <Text style={styles.sectionTitle}>Horas de mayor actividad</Text>
+          <View style={styles.chartCard}>
+            <HourlyChart data={hourlyData} />
+          </View>
+        </>
       )}
 
       {/* Info adicional */}
@@ -509,6 +734,144 @@ const styles = StyleSheet.create({
   legendText: {
     fontSize: 10,
     color: colors.textSecondary,
+  },
+
+  // Coverage
+  coverageCard: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing.lg,
+    elevation: 1,
+  },
+  coverageHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.md,
+  },
+  coverageMainValue: {
+    fontSize: 36,
+    fontWeight: '700',
+    color: colors.primary,
+  },
+  coverageSubtext: {
+    fontSize: fontSize.caption,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  coverageCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: colors.border,
+    overflow: 'hidden',
+    justifyContent: 'flex-end',
+  },
+  coverageCircleFill: {
+    width: '100%',
+    borderTopLeftRadius: 2,
+    borderTopRightRadius: 2,
+  },
+  coverageDetails: {
+    flexDirection: 'row',
+    gap: spacing.lg,
+  },
+  coverageDetailItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  coverageDetailDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    marginRight: spacing.xs,
+  },
+  coverageDetailText: {
+    fontSize: fontSize.caption,
+    color: colors.textSecondary,
+  },
+
+  // Daily chart
+  chartCard: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    elevation: 1,
+  },
+  chartContainer: {
+    paddingVertical: spacing.sm,
+  },
+  chartBars: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    alignItems: 'flex-end',
+  },
+  chartBarGroup: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  chartBarCount: {
+    fontSize: 9,
+    color: colors.textSecondary,
+    fontWeight: '600',
+    marginBottom: 2,
+    height: 12,
+  },
+  chartBarWrapper: {
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+  },
+  chartBarLabel: {
+    fontSize: 8,
+    color: colors.textSecondary,
+    marginTop: 4,
+    textAlign: 'center',
+  },
+  chartEmpty: {
+    padding: spacing.lg,
+    alignItems: 'center',
+  },
+  chartEmptyText: {
+    fontSize: fontSize.caption,
+    color: colors.textSecondary,
+  },
+  chartLegend: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: spacing.md,
+    marginTop: spacing.sm,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+
+  // Hourly chart
+  hourlyContainer: {
+    paddingVertical: spacing.xs,
+  },
+  hourlyBars: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    alignItems: 'flex-end',
+  },
+  hourlyBarGroup: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  hourlyCount: {
+    fontSize: 8,
+    color: colors.primary,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  hourlyBarWrapper: {
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+  },
+  hourlyLabel: {
+    fontSize: 8,
+    color: colors.textSecondary,
+    marginTop: 3,
   },
 
   // Extra row

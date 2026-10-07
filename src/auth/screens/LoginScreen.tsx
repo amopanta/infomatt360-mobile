@@ -6,7 +6,7 @@
  * - Maneja flujo MFA si el usuario lo tiene activo.
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -21,6 +21,8 @@ import {
 } from 'react-native';
 import { login, verifyMfa, getSession } from '../../api/authApi';
 import { useAuthStore } from '../../store/authStore';
+import { useServerStore } from '../../store/serverStore';
+import { ENV } from '../../config/env';
 import { getDeviceFingerprint } from '../../utils/deviceFingerprint';
 import { startAutoSync } from '../../sync/syncService';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
@@ -30,6 +32,8 @@ export default function LoginScreen() {
   const [password, setPassword] = useState('');
   const [orgSlug, setOrgSlug] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showServerConfig, setShowServerConfig] = useState(false);
+  const [serverUrl, setServerUrl] = useState('');
 
   // Estado MFA
   const [mfaRequired, setMfaRequired] = useState(false);
@@ -37,6 +41,12 @@ export default function LoginScreen() {
   const [totpCode, setTotpCode] = useState('');
 
   const { setTokens, setSession } = useAuthStore();
+  const { customUrl, setServerUrl: saveServerUrl, resetToDefault } = useServerStore();
+
+  // Cargar URL actual al montar
+  useEffect(() => {
+    setServerUrl(customUrl ?? '');
+  }, [customUrl]);
 
   const handleLogin = async () => {
     if (!email.trim() || !password.trim()) {
@@ -154,6 +164,63 @@ export default function LoginScreen() {
           <Text style={styles.title}>InfoMatt360</Text>
           <Text style={styles.subtitle}>Aplicacion de Campo</Text>
 
+          {/* Indicador del servidor actual */}
+          <TouchableOpacity
+            style={styles.serverIndicator}
+            onPress={() => setShowServerConfig(!showServerConfig)}
+          >
+            <Text style={styles.serverIndicatorLabel}>
+              Servidor: {customUrl ? 'Personalizado' : 'Por defecto'}
+            </Text>
+            <Text style={styles.serverIndicatorIcon}>
+              {showServerConfig ? '▲' : '▼'}
+            </Text>
+          </TouchableOpacity>
+
+          {/* Panel de configuracion del servidor */}
+          {showServerConfig && (
+            <View style={styles.serverPanel}>
+              <Text style={styles.serverPanelLabel}>URL del servidor</Text>
+              <TextInput
+                style={styles.input}
+                placeholder={ENV.API_BASE_URL}
+                value={serverUrl}
+                onChangeText={setServerUrl}
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="url"
+              />
+              <View style={styles.serverActions}>
+                <TouchableOpacity
+                  style={styles.serverBtn}
+                  onPress={() => {
+                    if (serverUrl.trim()) {
+                      saveServerUrl(serverUrl.trim());
+                      Alert.alert('Servidor actualizado', 'La URL del servidor ha sido guardada.');
+                    }
+                    setShowServerConfig(false);
+                  }}
+                >
+                  <Text style={styles.serverBtnText}>Guardar</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.serverBtn, styles.serverBtnSecondary]}
+                  onPress={() => {
+                    resetToDefault();
+                    setServerUrl('');
+                    setShowServerConfig(false);
+                    Alert.alert('Servidor restaurado', 'Se usara el servidor por defecto.');
+                  }}
+                >
+                  <Text style={styles.serverBtnSecondaryText}>Usar defecto</Text>
+                </TouchableOpacity>
+              </View>
+              <Text style={styles.serverHint}>
+                Ejemplo: https://miservidor.com/api/v1
+              </Text>
+            </View>
+          )}
+
           <TextInput
             style={styles.input}
             placeholder="Organizacion (opcional)"
@@ -254,5 +321,73 @@ const styles = StyleSheet.create({
     color: colors.textOnPrimary,
     fontSize: fontSize.subtitle,
     fontWeight: '600',
+  },
+  // Server config
+  serverIndicator: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    padding: spacing.sm,
+    marginBottom: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  serverIndicatorLabel: {
+    fontSize: fontSize.caption,
+    color: colors.textSecondary,
+  },
+  serverIndicatorIcon: {
+    fontSize: fontSize.caption,
+    color: colors.textSecondary,
+  },
+  serverPanel: {
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.primary + '30',
+  },
+  serverPanelLabel: {
+    fontSize: fontSize.caption,
+    fontWeight: '600',
+    color: colors.primary,
+    marginBottom: spacing.sm,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  serverActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  serverBtn: {
+    flex: 1,
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    padding: spacing.sm,
+    alignItems: 'center',
+  },
+  serverBtnText: {
+    color: colors.textOnPrimary,
+    fontSize: fontSize.caption,
+    fontWeight: '600',
+  },
+  serverBtnSecondary: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  serverBtnSecondaryText: {
+    color: colors.textSecondary,
+    fontSize: fontSize.caption,
+    fontWeight: '600',
+  },
+  serverHint: {
+    fontSize: 10,
+    color: colors.textSecondary,
+    fontStyle: 'italic',
   },
 });

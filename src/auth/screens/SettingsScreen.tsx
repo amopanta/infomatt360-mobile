@@ -15,6 +15,7 @@ import {
   Text,
   ScrollView,
   TouchableOpacity,
+  TextInput,
   Switch,
   StyleSheet,
   Alert,
@@ -23,6 +24,8 @@ import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useSettingsStore } from '../../store/settingsStore';
 import { usePinStore } from '../../store/pinStore';
+import { useServerStore } from '../../store/serverStore';
+import { ENV } from '../../config/env';
 import { getDatabase, getCrashLogCount, clearCrashLogs } from '../../db/database';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
@@ -138,8 +141,11 @@ export default function SettingsScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<any>>();
   const settings = useSettingsStore();
   const { pinEnabled, changePin, removePin } = usePinStore();
+  const { customUrl, setServerUrl: saveServerUrl, resetToDefault, getEffectiveUrl } = useServerStore();
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
   const [crashCount, setCrashCount] = useState(0);
+  const [editingServer, setEditingServer] = useState(false);
+  const [serverUrlInput, setServerUrlInput] = useState(customUrl ?? '');
 
   useEffect(() => {
     if (!settings.loaded) settings.load();
@@ -247,6 +253,106 @@ export default function SettingsScreen() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+      {/* Servidor API */}
+      <SectionHeader title="Servidor API" />
+      <View style={styles.card}>
+        <View style={styles.actionRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.settingLabel}>URL del servidor</Text>
+            <Text style={styles.settingDescription} numberOfLines={2}>
+              {getEffectiveUrl()}
+            </Text>
+          </View>
+          <View style={[styles.levelBadge, customUrl ? styles.levelBadgeCustom : styles.levelBadgeOk]}>
+            <Text style={[styles.levelBadgeText, { color: customUrl ? colors.accent : colors.success }]}>
+              {customUrl ? 'CUSTOM' : 'DEFAULT'}
+            </Text>
+          </View>
+        </View>
+        <View style={styles.separator} />
+        {editingServer ? (
+          <View>
+            <TextInput
+              style={styles.serverInput}
+              placeholder={ENV.API_BASE_URL}
+              value={serverUrlInput}
+              onChangeText={setServerUrlInput}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+            />
+            <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm }}>
+              <TouchableOpacity
+                style={[styles.serverActionBtn, { backgroundColor: colors.primary }]}
+                onPress={() => {
+                  if (serverUrlInput.trim()) {
+                    saveServerUrl(serverUrlInput.trim());
+                    Alert.alert(
+                      'Servidor actualizado',
+                      'La URL ha sido guardada. Cierre sesion e inicie de nuevo para conectar al nuevo servidor.',
+                    );
+                  }
+                  setEditingServer(false);
+                }}
+              >
+                <Text style={{ color: colors.textOnPrimary, fontSize: fontSize.caption, fontWeight: '600' }}>
+                  Guardar
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.serverActionBtn, { borderWidth: 1, borderColor: colors.border }]}
+                onPress={() => {
+                  setServerUrlInput(customUrl ?? '');
+                  setEditingServer(false);
+                }}
+              >
+                <Text style={{ color: colors.textSecondary, fontSize: fontSize.caption, fontWeight: '600' }}>
+                  Cancelar
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        ) : (
+          <>
+            <TouchableOpacity
+              style={styles.actionRow}
+              onPress={() => setEditingServer(true)}
+            >
+              <Text style={[styles.actionText, { color: colors.primary }]}>Cambiar servidor</Text>
+              <Text style={styles.actionIcon}>🔧</Text>
+            </TouchableOpacity>
+            {customUrl && (
+              <>
+                <View style={styles.separator} />
+                <TouchableOpacity
+                  style={styles.actionRow}
+                  onPress={() => {
+                    Alert.alert(
+                      'Restaurar servidor',
+                      `Se usara el servidor por defecto:\n${ENV.API_BASE_URL}`,
+                      [
+                        { text: 'Cancelar', style: 'cancel' },
+                        {
+                          text: 'Restaurar',
+                          onPress: () => {
+                            resetToDefault();
+                            setServerUrlInput('');
+                            Alert.alert('Listo', 'Cierre sesion e inicie de nuevo para conectar al servidor por defecto.');
+                          },
+                        },
+                      ],
+                    );
+                  }}
+                >
+                  <Text style={styles.actionText}>Restaurar servidor por defecto</Text>
+                  <Text style={styles.actionIcon}>↩️</Text>
+                </TouchableOpacity>
+              </>
+            )}
+          </>
+        )}
+      </View>
+
       {/* GPS */}
       <SectionHeader title="GPS y ubicacion" />
       <View style={styles.card}>
@@ -735,6 +841,23 @@ const styles = StyleSheet.create({
   },
   levelBadgeOk: {
     backgroundColor: colors.success + '15',
+  },
+  levelBadgeCustom: {
+    backgroundColor: colors.accent + '15',
+  },
+  serverInput: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: borderRadius.md,
+    padding: spacing.sm,
+    fontSize: fontSize.caption,
+    backgroundColor: colors.background,
+  },
+  serverActionBtn: {
+    flex: 1,
+    borderRadius: borderRadius.md,
+    padding: spacing.sm,
+    alignItems: 'center' as const,
   },
   levelBadgeText: {
     fontSize: fontSize.body,

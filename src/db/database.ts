@@ -602,6 +602,85 @@ export function getGlobalStats(dateFrom?: string, dateTo?: string): {
   };
 }
 
+/** Estadisticas de cobertura de participantes */
+export function getParticipantCoverageStats(projectId: number): {
+  totalParticipants: number;
+  withRecords: number;
+  withoutRecords: number;
+  coveragePercent: number;
+} {
+  const db = getDatabase();
+
+  const total = db.getFirstSync<{ cnt: number }>(
+    'SELECT COUNT(*) as cnt FROM participants WHERE project_id = ?',
+    [projectId],
+  );
+
+  const withRecs = db.getFirstSync<{ cnt: number }>(
+    `SELECT COUNT(DISTINCT participant_id) as cnt
+     FROM queued_records
+     WHERE project_id = ? AND participant_id IS NOT NULL AND status != 'draft'`,
+    [projectId],
+  );
+
+  const totalCount = total?.cnt ?? 0;
+  const withCount = withRecs?.cnt ?? 0;
+
+  return {
+    totalParticipants: totalCount,
+    withRecords: withCount,
+    withoutRecords: totalCount - withCount,
+    coveragePercent: totalCount > 0 ? Math.round((withCount / totalCount) * 100) : 0,
+  };
+}
+
+/** Actividad diaria — registros por dia en los ultimos N dias */
+export function getDailyActivity(days: number = 14): {
+  date: string;
+  count: number;
+  synced: number;
+  pending: number;
+}[] {
+  const db = getDatabase();
+  const rows = db.getAllSync<{
+    day: string;
+    total: number;
+    synced: number;
+    pending: number;
+  }>(
+    `SELECT
+       date(created_at) as day,
+       COUNT(*) as total,
+       SUM(CASE WHEN status = 'synced' THEN 1 ELSE 0 END) as synced,
+       SUM(CASE WHEN status IN ('pending', 'syncing', 'error') THEN 1 ELSE 0 END) as pending
+     FROM queued_records
+     WHERE created_at >= date('now', ? || ' days')
+     GROUP BY date(created_at)
+     ORDER BY day ASC`,
+    [`-${days}`],
+  );
+
+  return rows.map((r) => ({
+    date: r.day,
+    count: r.total,
+    synced: r.synced,
+    pending: r.pending,
+  }));
+}
+
+/** Productividad — registros por hora del dia */
+export function getHourlyDistribution(): { hour: number; count: number }[] {
+  const db = getDatabase();
+  const rows = db.getAllSync<{ h: number; cnt: number }>(
+    `SELECT CAST(strftime('%H', created_at) AS INTEGER) as h, COUNT(*) as cnt
+     FROM queued_records
+     WHERE status != 'draft'
+     GROUP BY h
+     ORDER BY h ASC`,
+  );
+  return rows.map((r) => ({ hour: r.h, count: r.cnt }));
+}
+
 export function getPendingCount(): number {
   const db = getDatabase();
   const row = db.getFirstSync<{ count: number }>(

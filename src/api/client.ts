@@ -1,6 +1,7 @@
 /**
  * Cliente HTTP centralizado para la API de InfoMatt360.
  *
+ * - Usa la URL del servidor configurada por el usuario (serverStore).
  * - Inyecta Authorization header con el access_token guardado.
  * - Maneja refresh automatico cuando el token expira (401).
  * - Envia X-Project-Id con el proyecto activo.
@@ -12,6 +13,7 @@ import axios, {
 } from 'axios';
 import { ENV } from '../config/env';
 import { useAuthStore } from '../store/authStore';
+import { useServerStore } from '../store/serverStore';
 
 const api = axios.create({
   baseURL: ENV.API_BASE_URL,
@@ -19,10 +21,25 @@ const api = axios.create({
   headers: { 'Content-Type': 'application/json' },
 });
 
+/**
+ * Actualizar el baseURL del cliente axios.
+ * Se llama cuando el usuario cambia la URL del servidor.
+ */
+export function updateApiBaseUrl(url: string): void {
+  api.defaults.baseURL = url;
+}
+
 // ── Request interceptor: inyectar token y proyecto ───────────────────
 
 api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   const { accessToken, activeProjectId } = useAuthStore.getState();
+
+  // Usar siempre la URL mas reciente del serverStore
+  const effectiveUrl = useServerStore.getState().getEffectiveUrl();
+  if (effectiveUrl !== api.defaults.baseURL) {
+    api.defaults.baseURL = effectiveUrl;
+    config.baseURL = effectiveUrl;
+  }
 
   if (accessToken) {
     config.headers.Authorization = `Bearer ${accessToken}`;
@@ -75,7 +92,8 @@ async function performRefresh(): Promise<string> {
   const { refreshToken } = useAuthStore.getState();
   if (!refreshToken) throw new Error('No refresh token');
 
-  const res = await axios.post(`${ENV.API_BASE_URL}/auth/refresh`, {
+  const baseUrl = useServerStore.getState().getEffectiveUrl();
+  const res = await axios.post(`${baseUrl}/auth/refresh`, {
     refresh_token: refreshToken,
   });
 

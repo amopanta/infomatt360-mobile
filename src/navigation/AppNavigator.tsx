@@ -39,6 +39,7 @@ import ConflictResolutionScreen from '../sync/ConflictResolutionScreen';
 import ExportScreen from '../sync/ExportScreen';
 import OfflineBanner from '../ui/OfflineBanner';
 import { useAuthStore } from '../store/authStore';
+import { useServerStore } from '../store/serverStore';
 import { getPendingCount } from '../db/database';
 import { onSyncStatusChange } from '../sync/syncService';
 import { colors, fontSize } from '../ui/theme';
@@ -456,12 +457,13 @@ function ProfileStack() {
 export default function AppNavigator() {
   const { accessToken, session, activeProjectId, hydrate } = useAuthStore();
   const { pinEnabled, unlocked, hydrate: hydratePin } = usePinStore();
+  const { hydrate: hydrateServer } = useServerStore();
   const [loading, setLoading] = useState(true);
   const [showPinSetup, setShowPinSetup] = useState(false);
 
   useEffect(() => {
-    Promise.all([hydrate(), hydratePin()]).finally(() => setLoading(false));
-  }, [hydrate, hydratePin]);
+    Promise.all([hydrate(), hydratePin(), hydrateServer()]).finally(() => setLoading(false));
+  }, [hydrate, hydratePin, hydrateServer]);
 
   if (loading) {
     return (
