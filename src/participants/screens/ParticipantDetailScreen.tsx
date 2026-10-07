@@ -152,16 +152,29 @@ export default function ParticipantDetailScreen() {
       </View>
 
       {item.applied && item.record_local_id ? (
-        <TouchableOpacity
-          style={styles.viewBtn}
-          onPress={() =>
-            navigation.navigate('RecordDetail', {
-              recordLocalId: item.record_local_id,
-            })
-          }
-        >
-          <Text style={styles.viewBtnText}>Ver respuestas</Text>
-        </TouchableOpacity>
+        <View style={styles.appliedActions}>
+          <TouchableOpacity
+            style={styles.viewBtn}
+            onPress={() =>
+              navigation.navigate('RecordDetail', {
+                recordLocalId: item.record_local_id,
+              })
+            }
+          >
+            <Text style={styles.viewBtnText}>Ver</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.actaBtn}
+            onPress={() =>
+              navigation.navigate('ActaPreview', {
+                recordLocalId: item.record_local_id,
+                participantId,
+              })
+            }
+          >
+            <Text style={styles.actaBtnText}>Acta</Text>
+          </TouchableOpacity>
+        </View>
       ) : !item.applied ? (
         <TouchableOpacity
           style={styles.captureBtn}
@@ -367,6 +380,9 @@ const styles = StyleSheet.create({
     fontSize: fontSize.caption,
     color: colors.textSecondary,
   },
+  appliedActions: {
+    gap: spacing.xs,
+  },
   viewBtn: {
     backgroundColor: colors.primary + '15',
     paddingVertical: spacing.sm,
@@ -377,6 +393,19 @@ const styles = StyleSheet.create({
     fontSize: fontSize.caption,
     color: colors.primary,
     fontWeight: '600',
+    textAlign: 'center' as const,
+  },
+  actaBtn: {
+    backgroundColor: colors.success + '15',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: borderRadius.md,
+  },
+  actaBtnText: {
+    fontSize: fontSize.caption,
+    color: colors.success,
+    fontWeight: '600',
+    textAlign: 'center' as const,
   },
   captureBtn: {
     backgroundColor: colors.accent + '15',

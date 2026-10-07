@@ -33,6 +33,7 @@ import RecordDetailScreen from '../forms/screens/RecordDetailScreen';
 import RecordsMapScreen from '../map/RecordsMapScreen';
 import ParticipantListScreen from '../participants/screens/ParticipantListScreen';
 import ParticipantDetailScreen from '../participants/screens/ParticipantDetailScreen';
+import ActaPreviewScreen from '../actas/screens/ActaPreviewScreen';
 import SyncStatusScreen from '../sync/SyncStatusScreen';
 import ConflictResolutionScreen from '../sync/ConflictResolutionScreen';
 import ExportScreen from '../sync/ExportScreen';
@@ -268,6 +269,11 @@ function ParticipantsStack() {
         name="RecordDetail"
         component={RecordDetailScreen}
         options={{ title: 'Respuestas enviadas' }}
+      />
+      <Stack.Screen
+        name="ActaPreview"
+        component={ActaPreviewScreen}
+        options={{ title: 'Generar Acta' }}
       />
       <Stack.Screen
         name="EvidenceCapture"

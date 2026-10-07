@@ -46,6 +46,7 @@ export default function FormCaptureScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<any>>();
   const { activeProjectId } = useAuthStore();
   const formId: number = route.params?.formId;
+  const participantId: number | undefined = route.params?.participantId;
 
   const [formName, setFormName] = useState('');
   const [pages, setPages] = useState<FormPage[]>([]);
@@ -372,6 +373,7 @@ export default function FormCaptureScreen() {
         localId: recordLocalId,
         projectId: activeProjectId,
         templateId: formId,
+        participantId,
         data: recordValues,
         evidencePaths,
         gps: gps ? { lat: gps.lat, lng: gps.lng, accuracy: gps.accuracy } : undefined,
