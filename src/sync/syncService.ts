@@ -122,8 +122,12 @@ export async function syncNow(): Promise<boolean> {
     // 1. Subir evidencias pendientes
     await uploadPendingEvidence();
 
-    // 2. Obtener registros pendientes y agrupar por (project, template)
-    const records = listPendingRecords();
+    // 2. Obtener registros pendientes y agrupar por (project, template).
+    // Un registro con evidencias aún sin subir espera al siguiente ciclo, para
+    // no enviar al servidor rutas de archivos que solo existen en el teléfono.
+    const records = listPendingRecords().filter((r) =>
+      getRecordEvidence(r.local_id).every((ev) => ev.uploaded),
+    );
     const groups = new Map<string, typeof records>();
 
     for (const rec of records) {
@@ -142,40 +146,43 @@ export async function syncNow(): Promise<boolean> {
           sortedIds,
         );
 
+        const { project_id, template_id } = groupRecords[0];
         const payload: BulkSavePayload = {
-          project_id: groupRecords[0].project_id,
-          template_id: groupRecords[0].template_id,
+          project_id,
+          template_id,
           idempotency_key: idempotencyKey,
           records: groupRecords.map((r) => ({
-            participant_id: r.participant_id ?? undefined,
+            project_id,
+            template_id,
+            participant_id: r.participant_id ?? null,
             status: 'submitted',
-            values: JSON.parse(r.data_json) as RecordValue[],
+            values: toBackendValues(JSON.parse(r.data_json) as RecordValue[], evidenceIdsFor(r.local_id)),
           })),
         };
 
         const result = await bulkSaveRecords(payload);
 
-        // Procesar resultados por item
-        for (const item of result.results) {
-          const rec = groupRecords[item.index];
-          if (!rec) continue;
-
-          if (item.status === 'created' || item.status === 'replayed') {
+        // Procesar resultados por item; un item sin respuesta queda en error
+        // para reintentarlo (misma regla que la PWA, offlineSync.ts).
+        const byIndex = new Map(result.results.map((item) => [item.index, item]));
+        groupRecords.forEach((rec, index) => {
+          const item = byIndex.get(index);
+          if (item?.status === 'created' || item?.status === 'queued') {
             markRecordSynced(rec.local_id);
-          } else if (item.status === 'conflict') {
+          } else if (item?.status === 'conflict') {
             // Conflicto detectado por el servidor: guardar ambas versiones
             markRecordConflict(
               rec.local_id,
               item.server_values ?? [],
-              item.record_id ?? null,
+              item.id ?? null,
               item.server_updated_at ?? null,
             );
             hadFailures = true;
           } else {
-            markRecordError(rec.local_id, item.error ?? 'Error desconocido');
+            markRecordError(rec.local_id, item?.error ?? 'El servidor no confirmó este registro');
             hadFailures = true;
           }
-        }
+        });
       } catch (err: any) {
         // HTTP 409 Conflict: el servidor indica conflicto a nivel de lote
         if (err?.response?.status === 409) {
@@ -209,12 +216,48 @@ export async function syncNow(): Promise<boolean> {
   return hadFailures;
 }
 
+/** Valores locales → contrato del backend (field_value_json como texto JSON).
+ * Si un valor apunta a un archivo local ya subido, se envía el id del archivo
+ * en el servidor, que es lo que guarda la web para campos IMAGE/FILE/SIGNATURE. */
+function toBackendValues(values: RecordValue[], uploaded: Map<string, string>): { field_name: string; field_value_json: string }[] {
+  const seen = new Set<string>();
+  const out: { field_name: string; field_value_json: string }[] = [];
+  for (const v of values) {
+    const name = v.field_name || v.field_id;
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const raw = typeof v.field_value_json === 'string' && uploaded.has(v.field_value_json)
+      ? uploaded.get(v.field_value_json)
+      : v.field_value_json;
+    out.push({ field_name: name, field_value_json: JSON.stringify(raw ?? null) });
+  }
+  return out;
+}
+
+/** uri local → id del archivo en el servidor, para las evidencias ya subidas */
+function evidenceIdsFor(recordLocalId: string): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const ev of getRecordEvidence(recordLocalId)) {
+    if (ev.uploaded && ev.remote_url) map.set(ev.file_uri, ev.remote_url);
+  }
+  return map;
+}
+
+/** Tipo de evidencia local → asset_type aceptado por POST /files/upload */
+function assetTypeFor(type: string, mime: string): string {
+  if (type === 'signature') return 'SIGNATURE';
+  if (type === 'fingerprint') return 'FINGERPRINT';
+  if (mime.startsWith('image/')) return 'IMAGE';
+  if (mime.startsWith('video/')) return 'VIDEO';
+  if (mime.startsWith('audio/')) return 'AUDIO';
+  if (mime === 'application/pdf') return 'PDF';
+  return 'FILE';
+}
+
 // ── Subida de evidencias ─────────────────────────────────────────────
 
 async function uploadPendingEvidence(): Promise<void> {
   const records = listPendingRecords();
-  const { activeProjectId } = useAuthStore.getState();
-  if (!activeProjectId) return;
 
   for (const rec of records) {
     const evidences = getRecordEvidence(rec.local_id);
@@ -222,12 +265,14 @@ async function uploadPendingEvidence(): Promise<void> {
       if (ev.uploaded) continue;
       try {
         const result = await uploadEvidence(
-          activeProjectId,
+          rec.project_id,
           ev.file_uri,
           ev.mime_type,
           `${ev.local_id}.${ev.mime_type.split('/')[1] ?? 'bin'}`,
+          assetTypeFor(ev.type, ev.mime_type),
+          rec.participant_id,
         );
-        markEvidenceUploaded(ev.local_id, result.url);
+        markEvidenceUploaded(ev.local_id, result.id);
       } catch {
         // Se reintentara en el proximo ciclo
       }

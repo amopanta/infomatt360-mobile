@@ -13,13 +13,13 @@ interface AuthState {
   accessToken: string | null;
   refreshToken: string | null;
   session: UserSession | null;
-  activeProjectId: number | null;
+  activeProjectId: string | null;
   activePermissions: string[];
 
   // Acciones
   setTokens: (access: string, refresh: string) => void;
   setSession: (session: UserSession) => void;
-  selectProject: (projectId: number) => void;
+  selectProject: (projectId: string) => void;
   logout: () => void;
   hydrate: () => Promise<void>;
 }
@@ -80,7 +80,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         set({
           accessToken: access,
           refreshToken: refresh,
-          activeProjectId: projId ? Number(projId) : null,
+          activeProjectId: projId || null,
         });
       }
     } catch {

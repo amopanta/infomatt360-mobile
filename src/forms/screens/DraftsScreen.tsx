@@ -27,8 +27,8 @@ import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
 interface LocalRecord {
   local_id: string;
-  project_id: number;
-  template_id: number;
+  project_id: string;
+  template_id: string;
   status: string;
   data_json: string;
   gps_json: string | null;

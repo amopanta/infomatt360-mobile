@@ -144,3 +144,17 @@ La app se conecta al backend InfoMatt360 (FastAPI + PostgreSQL + PostGIS):
 - [Captura de huella del participante](../amopanta/infomatt360/docs/134_CAPTURA_HUELLA_PARTICIPANTE.md)
 - [Asset lock y sesión extendida](../amopanta/infomatt360/docs/91_ASSET_LOCK_Y_SESION_EXTENDIDA_CAMPO.md)
 - [Sistema de diseño](../amopanta/infomatt360/docs/123_SISTEMA_DE_DISENO.md)
+
+## Contrato con el backend (actualizado 2026-10-17)
+
+Esta es la **app móvil oficial** de InfoMatt360. El antiguo módulo `mobile/` del repositorio principal (Express + Capacitor) se retiró porque usaba su propia base de datos.
+
+| Función | Endpoint del backend principal |
+|---|---|
+| Login / MFA | `POST /auth/login` (reto `mfa_challenge_token`) → `POST /auth/mfa/verify` `{challenge_token, code}` |
+| Formularios | `GET /builder/templates/{project_id}` (solo `published`) + `GET /runtime/template/{id}` |
+| Participantes | `GET /participants/project/{project_id}`, `GET /participants/{id}`, `GET /participants/{id}/activities` |
+| Sincronización | `POST /runtime/session/bulk-save` — cada registro lleva `project_id`, `template_id` y `values: [{field_name, field_value_json}]` (JSON en texto) |
+| Evidencias | `POST /files/upload` (multipart: `upload`, `project_id`, `asset_type`) |
+
+Los identificadores son UUID (texto). Al actualizar, la app recrea una vez las tablas de caché local (`form_templates`, `participants`) sin tocar la cola de capturas pendientes. Detalle en `docs/140_REESTRUCTURACION_UX_Y_CLIENTE_MOVIL_UNICO.md` del repositorio principal.

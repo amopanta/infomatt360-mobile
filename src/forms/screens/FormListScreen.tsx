@@ -28,14 +28,14 @@ import { useAuthStore } from '../../store/authStore';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
 interface CachedForm {
-  id: number;
+  id: string;
   name: string;
   description: string | null;
   version: number;
   template_id: string;
 }
 
-type RecordCounts = Record<number, { pending: number; synced: number; error: number; draft: number }>;
+type RecordCounts = Record<string, { pending: number; synced: number; error: number; draft: number }>;
 
 export default function FormListScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<any>>();

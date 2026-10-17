@@ -18,8 +18,8 @@ export type ExportFormat = 'json' | 'csv';
 
 export interface ExportOptions {
   format: ExportFormat;
-  projectId?: number;
-  templateId?: number;
+  projectId?: string;
+  templateId?: string;
   status?: string;
   /** Incluir solo registros creados despues de esta fecha (YYYY-MM-DD) */
   fromDate?: string;

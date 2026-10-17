@@ -34,7 +34,7 @@ import { useAuthStore } from '../../store/authStore';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
 interface CachedParticipant {
-  id: number;
+  id: string;
   full_name: string;
   document_type: string;
   document_number: string;

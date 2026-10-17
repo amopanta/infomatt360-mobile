@@ -45,8 +45,8 @@ export default function FormCaptureScreen() {
   const route = useRoute<any>();
   const navigation = useNavigation<NativeStackNavigationProp<any>>();
   const { activeProjectId } = useAuthStore();
-  const formId: number = route.params?.formId;
-  const participantId: number | undefined = route.params?.participantId;
+  const formId: string = route.params?.formId;
+  const participantId: string | undefined = route.params?.participantId;
 
   const [formName, setFormName] = useState('');
   const [pages, setPages] = useState<FormPage[]>([]);

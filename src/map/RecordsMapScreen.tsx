@@ -30,7 +30,7 @@ import { colors, spacing, fontSize, borderRadius } from '../ui/theme';
 
 interface MapRecord {
   local_id: string;
-  template_id: number;
+  template_id: string;
   status: string;
   gps_json: string;
   created_at: string;

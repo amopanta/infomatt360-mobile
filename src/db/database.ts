@@ -25,11 +25,21 @@ function initializeDatabase(database: SQLite.SQLiteDatabase): void {
   database.execSync(`PRAGMA journal_mode = WAL;`);
   database.execSync(`PRAGMA foreign_keys = ON;`);
 
+  // v2: el backend usa UUID (texto) como identificador. Las tablas de cache
+  // se crearon con INTEGER PRIMARY KEY, que rechaza UUID; como solo guardan
+  // copias descargables del servidor, se recrean sin perder capturas.
+  const version = database.getFirstSync<{ user_version: number }>('PRAGMA user_version')?.user_version ?? 0;
+  if (version < 2) {
+    database.execSync(`DROP TABLE IF EXISTS form_templates;`);
+    database.execSync(`DROP TABLE IF EXISTS participants;`);
+    database.execSync(`PRAGMA user_version = 2;`);
+  }
+
   // Cache de plantillas de formularios
   database.execSync(`
     CREATE TABLE IF NOT EXISTS form_templates (
-      id INTEGER PRIMARY KEY,
-      project_id INTEGER NOT NULL,
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
       template_id TEXT NOT NULL,
       version INTEGER NOT NULL DEFAULT 1,
       name TEXT NOT NULL,
@@ -114,8 +124,8 @@ function initializeDatabase(database: SQLite.SQLiteDatabase): void {
   // Cache de participantes para vista 360
   database.execSync(`
     CREATE TABLE IF NOT EXISTS participants (
-      id INTEGER PRIMARY KEY,
-      project_id INTEGER NOT NULL,
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
       full_name TEXT NOT NULL,
       document_type TEXT NOT NULL DEFAULT 'CC',
       document_number TEXT NOT NULL,
@@ -159,9 +169,9 @@ function initializeDatabase(database: SQLite.SQLiteDatabase): void {
 
 export function enqueueRecord(record: {
   localId: string;
-  projectId: number;
-  templateId: number;
-  participantId?: number;
+  projectId: string;
+  templateId: string;
+  participantId?: string;
   data: unknown[];
   evidencePaths: string[];
   gps?: { lat: number; lng: number; accuracy: number };
@@ -185,9 +195,9 @@ export function enqueueRecord(record: {
 
 export function listPendingRecords(): {
   local_id: string;
-  project_id: number;
-  template_id: number;
-  participant_id: number | null;
+  project_id: string;
+  template_id: string;
+  participant_id: string | null;
   data_json: string;
   evidence_paths_json: string;
   gps_json: string | null;
@@ -230,7 +240,7 @@ export function resetErrorRecords(): void {
 export function markRecordConflict(
   localId: string,
   serverData: unknown[],
-  serverRecordId: number | null,
+  serverRecordId: string | null,
   serverUpdatedAt: string | null,
 ): void {
   const db = getDatabase();
@@ -254,12 +264,12 @@ export function markRecordConflict(
 /** Lista todos los registros en estado de conflicto */
 export function listConflictRecords(): {
   local_id: string;
-  project_id: number;
-  template_id: number;
-  participant_id: number | null;
+  project_id: string;
+  template_id: string;
+  participant_id: string | null;
   data_json: string;
   server_data_json: string | null;
-  server_record_id: number | null;
+  server_record_id: string | null;
   server_updated_at: string | null;
   created_at: string;
   updated_at: string;
@@ -354,9 +364,9 @@ export function getConflictCount(): number {
 
 export function getQueuedRecord(localId: string): {
   local_id: string;
-  project_id: number;
-  template_id: number;
-  participant_id: number | null;
+  project_id: string;
+  template_id: string;
+  participant_id: string | null;
   status: string;
   data_json: string;
   evidence_paths_json: string;
@@ -388,8 +398,8 @@ export function updateQueuedRecord(localId: string, data: unknown[], gps?: { lat
 /** Guarda o actualiza un borrador auto-guardado (status = 'draft') */
 export function saveAutoDraft(params: {
   localId: string;
-  projectId: number;
-  templateId: number;
+  projectId: string;
+  templateId: string;
   data: unknown[];
   gps?: { lat: number; lng: number; accuracy: number } | null;
 }): void {
@@ -443,12 +453,12 @@ export function deleteQueuedRecord(localId: string): void {
 }
 
 /** Conteo de registros agrupados por template_id y status */
-export function getRecordCountsByTemplate(): Record<number, { pending: number; synced: number; error: number; draft: number; conflict: number }> {
+export function getRecordCountsByTemplate(): Record<string, { pending: number; synced: number; error: number; draft: number; conflict: number }> {
   const db = getDatabase();
-  const rows = db.getAllSync<{ template_id: number; status: string; count: number }>(
+  const rows = db.getAllSync<{ template_id: string; status: string; count: number }>(
     `SELECT template_id, status, COUNT(*) as count FROM queued_records GROUP BY template_id, status`,
   );
-  const result: Record<number, { pending: number; synced: number; error: number; draft: number; conflict: number }> = {};
+  const result: Record<string, { pending: number; synced: number; error: number; draft: number; conflict: number }> = {};
   for (const row of rows) {
     if (!result[row.template_id]) {
       result[row.template_id] = { pending: 0, synced: 0, error: 0, draft: 0, conflict: 0 };
@@ -465,7 +475,7 @@ export function getRecordCountsByTemplate(): Record<number, { pending: number; s
  * Estadísticas por formulario filtradas por rango de fechas.
  */
 export function getStatsByTemplate(dateFrom?: string, dateTo?: string): {
-  templateId: number;
+  templateId: string;
   templateName: string;
   total: number;
   synced: number;
@@ -492,7 +502,7 @@ export function getStatsByTemplate(dateFrom?: string, dateTo?: string): {
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
   const rows = db.getAllSync<{
-    template_id: number;
+    template_id: string;
     template_name: string;
     total: number;
     synced: number;
@@ -603,7 +613,7 @@ export function getGlobalStats(dateFrom?: string, dateTo?: string): {
 }
 
 /** Estadisticas de cobertura de participantes */
-export function getParticipantCoverageStats(projectId: number): {
+export function getParticipantCoverageStats(projectId: string): {
   totalParticipants: number;
   withRecords: number;
   withoutRecords: number;
@@ -731,16 +741,16 @@ export function purgeOldSynced(retentionDays: number = 7): number {
 
 /** Lista todos los registros (para exportacion) */
 export function listAllRecords(filters?: {
-  projectId?: number;
-  templateId?: number;
+  projectId?: string;
+  templateId?: string;
   status?: string;
   fromDate?: string;
   toDate?: string;
 }): {
   local_id: string;
-  project_id: number;
-  template_id: number;
-  participant_id: number | null;
+  project_id: string;
+  template_id: string;
+  participant_id: string | null;
   status: string;
   data_json: string;
   gps_json: string | null;
@@ -842,8 +852,8 @@ export function getPendingEvidenceCount(): number {
 // ── Cache de formularios ─────────────────────────────────────────────
 
 export function cacheFormTemplate(template: {
-  id: number;
-  projectId: number;
+  id: string;
+  projectId: string;
   templateId: string;
   version: number;
   name: string;
@@ -867,9 +877,9 @@ export function cacheFormTemplate(template: {
   );
 }
 
-export function getCachedForms(projectId: number): {
-  id: number;
-  project_id: number;
+export function getCachedForms(projectId: string): {
+  id: string;
+  project_id: string;
   template_id: string;
   version: number;
   name: string;
@@ -883,8 +893,8 @@ export function getCachedForms(projectId: number): {
   ) as any;
 }
 
-export function getCachedForm(formId: number): {
-  id: number;
+export function getCachedForm(formId: string): {
+  id: string;
   schema_json: string;
   name: string;
   version: number;
@@ -952,8 +962,8 @@ export function clearCrashLogs(): void {
 
 /** Guarda o actualiza un participante en cache local */
 export function cacheParticipant(p: {
-  id: number;
-  projectId: number;
+  id: string;
+  projectId: string;
   fullName: string;
   documentType: string;
   documentNumber: string;
@@ -990,11 +1000,11 @@ export function cacheParticipant(p: {
 
 /** Lista participantes de un proyecto con búsqueda opcional */
 export function getCachedParticipants(
-  projectId: number,
+  projectId: string,
   search?: string,
 ): {
-  id: number;
-  project_id: number;
+  id: string;
+  project_id: string;
   full_name: string;
   document_type: string;
   document_number: string;
@@ -1031,9 +1041,9 @@ export function getCachedParticipants(
 }
 
 /** Obtiene un participante por ID */
-export function getCachedParticipant(participantId: number): {
-  id: number;
-  project_id: number;
+export function getCachedParticipant(participantId: string): {
+  id: string;
+  project_id: string;
   full_name: string;
   document_type: string;
   document_number: string;
@@ -1054,10 +1064,10 @@ export function getCachedParticipant(participantId: number): {
 
 /** Obtiene los formularios asociados a un participante con estado de aplicación */
 export function getParticipantFormStatus(
-  participantId: number,
-  projectId: number,
+  participantId: string,
+  projectId: string,
 ): {
-  template_id: number;
+  template_id: string;
   form_name: string;
   applied: boolean;
   applied_at: string | null;
@@ -1088,7 +1098,7 @@ export function getParticipantFormStatus(
 }
 
 /** Conteo de participantes en cache por proyecto */
-export function getParticipantCount(projectId: number): number {
+export function getParticipantCount(projectId: string): number {
   const db = getDatabase();
   const row = db.getFirstSync<{ count: number }>(
     `SELECT COUNT(*) as count FROM participants WHERE project_id = ?`,

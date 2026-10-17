@@ -30,10 +30,10 @@ import {
 import { useAuthStore } from '../../store/authStore';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
-type RouteParams = { ParticipantDetail: { participantId: number } };
+type RouteParams = { ParticipantDetail: { participantId: string } };
 
 interface FormStatusItem {
-  template_id: number;
+  template_id: string;
   form_name: string;
   applied: boolean;
   applied_at: string | null;
@@ -48,7 +48,7 @@ export default function ParticipantDetailScreen() {
   const { activeProjectId } = useAuthStore();
 
   const [participant, setParticipant] = useState<{
-    id: number;
+    id: string;
     full_name: string;
     document_type: string;
     document_number: string;

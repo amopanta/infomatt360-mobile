@@ -465,6 +465,17 @@ export default function AppNavigator() {
     Promise.all([hydrate(), hydratePin(), hydrateServer()]).finally(() => setLoading(false));
   }, [hydrate, hydratePin, hydrateServer]);
 
+  const isLoggedIn = !!accessToken;
+
+  // Ofrecer configurar PIN tras el primer login. Debe declararse antes del
+  // return de "Cargando...": un hook después de un return condicional cambia
+  // el número de hooks entre renders y React detiene la app.
+  useEffect(() => {
+    if (isLoggedIn && !pinEnabled && !unlocked) {
+      setShowPinSetup(true);
+    }
+  }, [isLoggedIn, pinEnabled, unlocked]);
+
   if (loading) {
     return (
       <View
@@ -489,7 +500,6 @@ export default function AppNavigator() {
     );
   }
 
-  const isLoggedIn = !!accessToken;
   const hasSession = !!session;
   const needsProjectSelect =
     hasSession && session.projects.length > 1 && !activeProjectId;
@@ -498,13 +508,6 @@ export default function AppNavigator() {
   const needsPinUnlock = isLoggedIn && pinEnabled && !unlocked;
   // Ofrecer configurar PIN tras primer login si no tiene PIN
   const shouldOfferPinSetup = isLoggedIn && !pinEnabled && !unlocked && showPinSetup;
-
-  // Mostrar pin setup despues de login exitoso
-  useEffect(() => {
-    if (isLoggedIn && !pinEnabled && !unlocked) {
-      setShowPinSetup(true);
-    }
-  }, [isLoggedIn, pinEnabled, unlocked]);
 
   return (
     <NavigationContainer>
