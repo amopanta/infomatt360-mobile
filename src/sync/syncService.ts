@@ -27,11 +27,18 @@ import {
   listEvidenceAwaitingRecord,
   markEvidenceUploaded,
   purgeOldSynced,
+  takePurgedEvidenceFiles,
   getPendingCount,
   getConflictCount,
+  insertCrashLog,
 } from '../db/database';
 import { useAuthStore } from '../store/authStore';
 import type { BulkSavePayload, RecordValue } from '../types';
+import { toBackendValues, type FileValue } from './backendValues';
+import { fileFingerprint } from '../evidence/evidenceFiles';
+import { extensionOf } from '../evidence/fileValues';
+
+export { nestRepeatValues } from './backendValues';
 
 // ── Estado del servicio ──────────────────────────────────────────────
 
@@ -120,8 +127,8 @@ async function tick(): Promise<void> {
   }
 
   // Sin red: esperar
-  const networkState = await Network.getNetworkStateAsync();
-  if (!networkState.isConnected || !networkState.isInternetReachable) {
+  const networkState = await Network.getNetworkStateAsync().catch(() => null);
+  if (!networkState?.isConnected || !networkState.isInternetReachable) {
     setStatus('paused_offline');
     scheduleNext(5_000);
     return;
@@ -136,8 +143,13 @@ async function tick(): Promise<void> {
     return;
   }
 
-  // Sincronizar
-  const hadFailures = await syncNow();
+  // Sincronizar. Un error inesperado no puede apagar el ciclo automático.
+  let hadFailures = true;
+  try {
+    hadFailures = await syncNow();
+  } catch {
+    hadFailures = true;
+  }
 
   if (hadFailures) {
     currentInterval = Math.min(currentInterval * 2, ENV.SYNC_INTERVAL_MAX);
@@ -256,7 +268,12 @@ export async function syncNow(): Promise<boolean> {
     await uploadAttachedEvidence();
 
     // 5. Limpieza automatica de sincronizados antiguos (doc 107)
-    purgeOldSynced(ENV.SYNCED_RETENTION_DAYS);
+    try {
+      purgeOldSynced(ENV.SYNCED_RETENTION_DAYS);
+      for (const uri of takePurgedEvidenceFiles()) await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+    } catch {
+      // Una limpieza fallida no debe detener el envío; se reintenta luego.
+    }
     if (!hadFailures && getPendingCount() === 0) noteSyncedUpToDate();
   } finally {
     isSyncing = false;
@@ -264,78 +281,6 @@ export async function syncNow(): Promise<boolean> {
   }
 
   return hadFailures;
-}
-
-/** Mismo formato que guarda la web para campos IMAGE/FILE/FINGERPRINT
- * (frontend/src/modules/runtime/api.ts: uploadRuntimeFile). */
-type FileValue = { file_asset_id: string; name: string; mime_type: string; size_bytes: number };
-
-/** Ruta local de un valor de campo: texto con la uri, o {uri}/{fileUri}. */
-function localUriOf(value: unknown): string | null {
-  if (typeof value === 'string') return value.startsWith('file:') || value.startsWith('content:') ? value : null;
-  if (value && typeof value === 'object') {
-    const v = value as { uri?: unknown; fileUri?: unknown };
-    if (typeof v.uri === 'string') return v.uri;
-    if (typeof v.fileUri === 'string') return v.fileUri;
-  }
-  return null;
-}
-
-/** Valores locales → contrato del backend (field_value_json como texto JSON).
- * Un campo que apunta a un archivo local ya subido se envía como referencia
- * al archivo del servidor, igual que la web. */
-function toBackendValues(
-  values: RecordValue[],
-  uploaded: Map<string, FileValue>,
-  types: Map<string, string>,
-): { field_name: string; field_value_json: string }[] {
-  const flat = new Map<string, unknown>();
-  for (const v of values) {
-    const name = v.field_name || v.field_id;
-    if (!name || flat.has(name)) continue;
-    const uri = localUriOf(v.field_value_json);
-    let raw = uri && uploaded.has(uri) ? uploaded.get(uri) : v.field_value_json;
-    // Sí/No se captura como texto 'true'/'false'; la web lo guarda como booleano.
-    // En grupos repetibles el tipo se busca por el nombre final ("...].acepta").
-    const leaf = name.slice(name.lastIndexOf('.') + 1);
-    if ((types.get(name) ?? types.get(leaf)) === 'BOOLEAN' && (raw === 'true' || raw === 'false')) raw = raw === 'true';
-    flat.set(name, raw ?? null);
-  }
-  const out: { field_name: string; field_value_json: string }[] = [];
-  for (const [name, value] of nestRepeatValues(flat)) {
-    out.push({ field_name: name, field_value_json: JSON.stringify(value) });
-  }
-  return out;
-}
-
-/**
- * La app guarda cada campo de un grupo repetible con clave indexada
- * ("integrantes[0].contactos[1].nombre"); el backend y la web esperan el
- * grupo como lista de filas `[{id, index, values}]`, con los anidados dentro
- * de su fila (frontend/src/modules/runtime/repeatEngine.ts).
- */
-export function nestRepeatValues(flat: Map<string, unknown>): Map<string, unknown> {
-  const out = new Map<string, unknown>();
-  const groups = new Map<string, Map<number, Map<string, unknown>>>();
-  for (const [key, value] of flat) {
-    const match = /^([^[\]]+)\[(\d+)\]\.(.+)$/.exec(key);
-    if (!match) { out.set(key, value); continue; }
-    const [, group, index, rest] = match;
-    const rows = groups.get(group) ?? new Map<number, Map<string, unknown>>();
-    groups.set(group, rows);
-    const row = rows.get(Number(index)) ?? new Map<string, unknown>();
-    rows.set(Number(index), row);
-    row.set(rest, value);
-  }
-  for (const [group, rows] of groups) {
-    const ordered = [...rows.keys()].sort((a, b) => a - b);
-    out.set(group, ordered.map((index, position) => ({
-      id: `${group}_${index + 1}`,
-      index: position,
-      values: Object.fromEntries(nestRepeatValues(rows.get(index)!)),
-    })));
-  }
-  return out;
 }
 
 /** uri local → archivo en el servidor, para las evidencias ya subidas */
@@ -407,25 +352,46 @@ function assetTypeFor(type: string, mime: string): string {
 
 /** Fotos/archivos de campo: se suben antes del registro, sin record_id. */
 async function uploadFieldEvidence(): Promise<void> {
-  const records = listPendingRecords();
-
-  for (const rec of records) {
+  for (const rec of listPendingRecords()) {
     for (const ev of fieldEvidence(rec)) {
       if (ev.uploaded) continue;
-      try {
-        const result = await uploadEvidence(
-          rec.project_id,
-          ev.file_uri,
-          ev.mime_type,
-          `${ev.local_id}.${ev.mime_type.split('/')[1] ?? 'bin'}`,
-          assetTypeFor(ev.type, ev.mime_type),
-          rec.participant_id,
-        );
-        markEvidenceUploaded(ev.local_id, result.id, result.size_bytes);
-      } catch {
-        // Se reintentara en el proximo ciclo
-      }
+      await uploadOneEvidence(ev, rec.project_id, rec.participant_id, null);
     }
+  }
+}
+
+/** Nombre con la extensión real (el servidor la conserva al guardar). */
+function uploadNameOf(ev: { local_id: string; file_uri: string; mime_type: string }): string {
+  const ext = extensionOf(ev.file_uri) || (ev.mime_type.split('/')[1] ?? 'bin').replace(/[^a-z0-9]/gi, '').slice(0, 5);
+  return `${ev.local_id}.${ext}`;
+}
+
+/**
+ * Sube una evidencia y solo la da por subida si el servidor confirma el
+ * mismo tamaño. El MD5 permite al servidor rechazar archivos dañados y la
+ * referencia (local_id) que un reintento devuelva el mismo archivo.
+ */
+async function uploadOneEvidence(
+  ev: { local_id: string; type: string; file_uri: string; mime_type: string },
+  projectId: string,
+  participantId: string | null,
+  recordId: string | null,
+): Promise<void> {
+  const local = await fileFingerprint(ev.file_uri);
+  if (!local) {
+    insertCrashLog({ level: 'error', message: `Evidencia no encontrada en el teléfono: ${ev.file_uri.split('/').pop()}`, component: 'sync' });
+    return;
+  }
+  try {
+    const result = await uploadEvidence(projectId, ev.file_uri, ev.mime_type, uploadNameOf(ev), assetTypeFor(ev.type, ev.mime_type),
+      participantId, recordId, { clientRef: ev.local_id, md5: local.md5 });
+    if (local.size && result.size_bytes !== local.size) {
+      insertCrashLog({ level: 'warning', message: `El servidor recibió ${result.size_bytes} de ${local.size} bytes; se reintentará`, component: 'sync' });
+      return;
+    }
+    markEvidenceUploaded(ev.local_id, result.id, result.size_bytes);
+  } catch {
+    // Se reintentará en el próximo ciclo (el servidor no duplica por client_ref)
   }
 }
 
@@ -460,19 +426,6 @@ async function uploadSignatures(): Promise<void> {
  * queden vinculadas al registro en el servidor. */
 async function uploadAttachedEvidence(): Promise<void> {
   for (const ev of listEvidenceAwaitingRecord()) {
-    try {
-      const result = await uploadEvidence(
-        ev.project_id,
-        ev.file_uri,
-        ev.mime_type,
-        `${ev.local_id}.${ev.mime_type.split('/')[1] ?? 'bin'}`,
-        assetTypeFor(ev.type, ev.mime_type),
-        ev.participant_id,
-        ev.server_record_id,
-      );
-      markEvidenceUploaded(ev.local_id, result.id, result.size_bytes);
-    } catch {
-      // Se reintentara en el proximo ciclo
-    }
+    await uploadOneEvidence(ev, ev.project_id, ev.participant_id, ev.server_record_id);
   }
 }

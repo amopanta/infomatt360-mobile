@@ -32,7 +32,6 @@ import { isFieldVisible } from '../utils/conditionalVisibility';
 import {
   getCachedForm,
   enqueueRecord,
-  insertEvidence,
   saveAutoDraft,
   promoteDraftToPending,
   deleteAutoDraft,
@@ -41,6 +40,8 @@ import { useAuthStore } from '../../store/authStore';
 import { requestSync } from '../../sync/syncService';
 import type { FormPage, FormSection, FormComponent, GpsCoordinate, RecordValue } from '../../types';
 import { compressImage, FIELD_CAMERA_OPTIONS } from '../../utils/imageCompressor';
+import { persistEvidenceFile, registerFieldEvidence } from '../../evidence/evidenceFiles';
+import { collectFileValues } from '../../evidence/fileValues';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
 export default function FormCaptureScreen() {
@@ -197,8 +198,11 @@ export default function FormCaptureScreen() {
       if (!result.canceled && result.assets[0]) {
         const asset = result.assets[0];
         const compressed = await compressImage(asset.uri);
-        handleFieldChange(fieldId, { uri: compressed.uri, type: 'photo', fileSize: compressed.fileSize });
-        setEvidencePaths((prev) => [...prev, compressed.uri]);
+        // La foto comprimida queda en caché (Android la puede vaciar): se
+        // guarda en evidencias hasta que el servidor la confirme.
+        const saved = await persistEvidenceFile(compressed.uri, { type: 'photo', fileName: 'foto.jpg', mimeType: 'image/jpeg' });
+        handleFieldChange(fieldId, saved);
+        setEvidencePaths((prev) => [...prev, saved.uri]);
       }
     },
     [handleFieldChange],
@@ -251,7 +255,7 @@ export default function FormCaptureScreen() {
       navigation.navigate('DocumentScanner', {
         fieldId,
         onDocumentScanned: (uri: string, fileName: string) => {
-          handleFieldChange(fieldId, { uri, fileName, type: 'document' });
+          handleFieldChange(fieldId, { uri, fileName, type: 'document', mimeType: 'application/pdf' });
           setEvidencePaths((prev) => [...prev, uri]);
         },
       });
@@ -367,23 +371,13 @@ export default function FormCaptureScreen() {
         templateId: formId,
         participantId,
         data: recordValues,
-        evidencePaths,
+        evidencePaths: collectFileValues(values).map((file) => file.uri),
         gps: gps ? { lat: gps.lat, lng: gps.lng, accuracy: gps.accuracy } : undefined,
       });
 
-      // Registrar evidencias en la tabla de evidencias
-      // Detectar huellas digitales por su ruta (directorio fingerprints/)
-      for (const uri of evidencePaths) {
-        const isFingerprint = uri.includes('/fingerprints/');
-        insertEvidence({
-          localId: uuidv4(),
-          recordLocalId,
-          type: isFingerprint ? 'fingerprint' : 'photo',
-          fileUri: uri,
-          mimeType: isFingerprint && uri.endsWith('.png') ? 'image/png' : 'image/jpeg',
-          fileSize: 0, // se actualizara al subir
-        });
-      }
+      // Registrar como evidencia cada archivo que quedó en las respuestas
+      // (fotos, PDF, audio, video, archivos, huellas), con su tipo real.
+      registerFieldEvidence(recordLocalId, values);
 
       // Envío automático, ya con las evidencias registradas: si hay señal sale
       // ya; si no, lo envía el ciclo automático o el aviso de reconexión.

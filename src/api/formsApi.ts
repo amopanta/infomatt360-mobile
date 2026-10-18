@@ -56,7 +56,7 @@ const TYPE_MAP: Record<string, string> = {
   GPS: 'gps', GEOTRACE: 'gps', GEOSHAPE: 'gps',
   IMAGE: 'photo',
   SIGNATURE: 'signature',
-  FILE: 'file', PDF: 'document', MULTIFILE: 'file', AUDIO: 'file', VIDEO: 'file',
+  FILE: 'file', PDF: 'document', MULTIFILE: 'multifile', AUDIO: 'audio', VIDEO: 'video',
   FINGERPRINT: 'fingerprint',
   // Necesitan consultar otros registros o una estructura que la app aún no
   // pinta: se muestran como aviso para completarlos desde la web.

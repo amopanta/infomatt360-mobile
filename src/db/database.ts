@@ -755,15 +755,45 @@ export function getPendingCount(): number {
   return row?.count ?? 0;
 }
 
+/** Archivos locales liberados por la última purga (los borra el llamador). */
+let purgedFiles: string[] = [];
+export function takePurgedEvidenceFiles(): string[] {
+  const files = purgedFiles;
+  purgedFiles = [];
+  return files;
+}
+
+/**
+ * Borra registros sincronizados hace más de `retentionDays` días junto con
+ * sus evidencias. Nunca toca pendientes, errores, conflictos ni registros con
+ * alguna evidencia sin confirmar por el servidor (H04: limpieza solo tras
+ * acuse definitivo). Antes fallaba con FOREIGN KEY si el registro tenía
+ * evidencias, y el error detenía la sincronización automática.
+ */
 export function purgeOldSynced(retentionDays: number = 7): number {
   const db = getDatabase();
-  const result = db.runSync(
-    `DELETE FROM queued_records
-     WHERE status = 'synced'
-       AND synced_at < datetime('now', ? || ' days')`,
+  const rows = db.getAllSync<{ local_id: string }>(
+    `SELECT q.local_id FROM queued_records q
+     WHERE q.status = 'synced'
+       AND q.synced_at < datetime('now', ? || ' days')
+       AND NOT EXISTS (SELECT 1 FROM evidence e WHERE e.record_local_id = q.local_id AND e.uploaded = 0)`,
     [`-${retentionDays}`],
   );
-  return result.changes;
+  if (!rows.length) return 0;
+  const ids = rows.map((r) => r.local_id);
+  const marks = ids.map(() => '?').join(',');
+  const files = db.getAllSync<{ file_uri: string }>(`SELECT file_uri FROM evidence WHERE record_local_id IN (${marks})`, ids);
+  db.execSync('BEGIN');
+  try {
+    db.runSync(`DELETE FROM evidence WHERE record_local_id IN (${marks})`, ids);
+    db.runSync(`DELETE FROM queued_records WHERE local_id IN (${marks})`, ids);
+    db.execSync('COMMIT');
+  } catch (error) {
+    db.execSync('ROLLBACK');
+    throw error;
+  }
+  purgedFiles.push(...files.map((f) => f.file_uri));
+  return ids.length;
 }
 
 /** Lista todos los registros (para exportacion) */

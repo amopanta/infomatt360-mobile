@@ -32,10 +32,11 @@ import {
   getCachedForm,
   getQueuedRecord,
   updateQueuedRecord,
-  insertEvidence,
+  getRecordEvidence,
 } from '../../db/database';
 import type { FormPage, FormSection, FormComponent, GpsCoordinate, RecordValue } from '../../types';
 import { compressImage, FIELD_CAMERA_OPTIONS } from '../../utils/imageCompressor';
+import { persistEvidenceFile, registerFieldEvidence } from '../../evidence/evidenceFiles';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
 export default function FormEditScreen() {
@@ -139,7 +140,8 @@ export default function FormEditScreen() {
       });
       if (!result.canceled && result.assets[0]) {
         const compressed = await compressImage(result.assets[0].uri);
-        handleFieldChange(fieldId, { uri: compressed.uri, type: 'photo', fileSize: compressed.fileSize });
+        const saved = await persistEvidenceFile(compressed.uri, { type: 'photo', fileName: 'foto.jpg', mimeType: 'image/jpeg' });
+        handleFieldChange(fieldId, saved);
         setNewEvidencePaths((prev) => [...prev, compressed.uri]);
       }
     },
@@ -188,7 +190,7 @@ export default function FormEditScreen() {
       navigation.navigate('DocumentScanner', {
         fieldId,
         onDocumentScanned: (uri: string, fileName: string) => {
-          handleFieldChange(fieldId, { uri, fileName, type: 'document' });
+          handleFieldChange(fieldId, { uri, fileName, type: 'document', mimeType: 'application/pdf' });
         },
       });
     },
@@ -295,17 +297,9 @@ export default function FormEditScreen() {
         gps ? { lat: gps.lat, lng: gps.lng, accuracy: gps.accuracy } : undefined,
       );
 
-      // Registrar nuevas evidencias
-      for (const uri of newEvidencePaths) {
-        insertEvidence({
-          localId: uuidv4(),
-          recordLocalId,
-          type: 'photo',
-          fileUri: uri,
-          mimeType: 'image/jpeg',
-          fileSize: 0,
-        });
-      }
+      // Registrar los archivos nuevos (los ya registrados no se repiten).
+      // Antes solo se registraban fotos; un PDF escaneado al editar no se subía.
+      registerFieldEvidence(recordLocalId, values, new Set(getRecordEvidence(recordLocalId).map((ev) => ev.file_uri)));
 
       Alert.alert('Guardado', 'Borrador actualizado. Se sincronizara automaticamente.', [
         { text: 'OK', onPress: () => navigation.goBack() },

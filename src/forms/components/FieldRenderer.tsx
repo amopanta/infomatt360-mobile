@@ -22,6 +22,7 @@ import {
 import DateTimePicker, { type DateTimePickerChangeEvent } from '@react-native-community/datetimepicker';
 import type { FormComponent } from '../../types';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
+import FileFieldControl from './FileFieldControl';
 
 interface FieldRendererProps {
   component: FormComponent;
@@ -328,41 +329,23 @@ export default function FieldRenderer({
       );
 
     case 'document':
-    case 'file': {
-      const docValue = value as { uri?: string; fileName?: string } | null;
+    case 'file':
+    case 'multifile':
+    case 'audio':
+    case 'video': {
+      const cfg = (component.config ?? {}) as Record<string, any>;
       return (
         <View style={styles.field}>
           {renderLabel()}
-          {docValue?.uri ? (
-            <View style={styles.documentPreviewContainer}>
-              <View style={styles.documentPreview}>
-                <Text style={styles.documentIcon}>📄</Text>
-                <View style={styles.documentInfo}>
-                  <Text style={styles.documentName} numberOfLines={1}>
-                    {docValue.fileName ?? 'documento.pdf'}
-                  </Text>
-                  <Text style={styles.documentType}>PDF escaneado</Text>
-                </View>
-              </View>
-              <TouchableOpacity
-                style={styles.rescanButton}
-                onPress={() => onScanDocument?.(id)}
-              >
-                <Text style={styles.rescanButtonText}>Escanear de nuevo</Text>
-              </TouchableOpacity>
-            </View>
-          ) : (
-            <TouchableOpacity
-              style={[styles.captureButton, hasError && { borderColor: colors.error }]}
-              onPress={() => onScanDocument?.(id)}
-            >
-              <Text style={styles.scanIcon}>📸</Text>
-              <Text style={styles.captureButtonText}>Escanear documento</Text>
-              <Text style={styles.scanHint}>
-                Tome fotos de las paginas para crear un PDF
-              </Text>
-            </TouchableOpacity>
-          )}
+          <FileFieldControl
+            kind={type}
+            backendType={cfg.backendType}
+            value={value}
+            hasError={hasError}
+            maxSeconds={typeof cfg.max_duration_seconds === 'number' ? cfg.max_duration_seconds : undefined}
+            onChange={(next) => onChange(id, next)}
+            onScanDocument={onScanDocument ? () => onScanDocument(id) : undefined}
+          />
           {renderError()}
         </View>
       );
