@@ -65,11 +65,18 @@ const TYPE_MAP: Record<string, string> = {
   MATRIX: 'webonly', LINKED_SUBFORM: 'webonly', PARENT_CHILD: 'webonly', LOOKUP: 'webonly', REFERENCE: 'webonly',
   // Sin control: la app solo registra la duración al enviar.
   INTERVIEW_DURATION: 'auto',
+  // Sin control visible: valor por defecto o calculado (formLogic.resolveFormValues)
+  CALCULATE: 'calculate', HIDDEN: 'hidden',
   REPEAT: 'repeat',
 };
 
 /** Campos que el servidor llena solo (ver runtime_record_service._fill_system_fields) */
-const SERVER_ONLY = new Set(['HIDDEN', 'CALCULATE', 'UUID', 'RESPONSE_ID', 'SERIAL_NUMBER', 'CAPTURED_BY', 'CHANGE_HISTORY']);
+// CALCULATE y HIDDEN no van aquí: los calcula el cliente (igual que la web) y
+// antes se descartaban, así que los registros de la app llegaban sin ellos (H03).
+const SERVER_ONLY = new Set(['UUID', 'RESPONSE_ID', 'SERIAL_NUMBER', 'CAPTURED_BY', 'CHANGE_HISTORY']);
+
+/** Operadores de la regla simple de la web → los de la app (antes empty/not_empty se volvían "igual a"). */
+const RELEVANT_OPERATORS: Record<string, 'eq' | 'neq' | 'empty' | 'notEmpty'> = { equals: 'eq', not_equals: 'neq', empty: 'empty', not_empty: 'notEmpty' };
 
 /** Escalas por defecto si el formulario no trae opciones (igual que la web). */
 function defaultOptions(type: string): { value: string; label: string }[] | undefined {
@@ -95,7 +102,7 @@ function fromDefinition(name: string, label: string, type: string, config: Recor
     validations: { ...constraintBounds(config.constraint_expression), ...pick({ min: config.min, max: config.max }), minLength: config.min_length, maxLength: config.max_length, pattern: config.pattern },
     config: { ...config, backendType: type, componentId },
     conditionalVisibility: config.relevant?.field
-      ? { logic: 'and', rules: [{ fieldId: config.relevant.field, operator: config.relevant.operator === 'not_equals' ? 'neq' : 'eq', value: config.relevant.value }] }
+      ? { logic: 'and', rules: [{ fieldId: config.relevant.field, operator: RELEVANT_OPERATORS[config.relevant.operator] ?? 'eq', value: config.relevant.value }] }
       : undefined,
   };
   if (type === 'REPEAT') component.children = repeatChildren(config.fields);

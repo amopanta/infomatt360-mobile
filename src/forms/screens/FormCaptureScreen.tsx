@@ -29,7 +29,7 @@ import PageProgressBar from '../components/PageProgressBar';
 import SignatureModal from '../components/SignatureModal';
 import FingerprintModal, { type FingerprintResult } from '../components/FingerprintModal';
 import { validateForm, validateField } from '../utils/validation';
-import { isFieldVisible } from '../utils/conditionalVisibility';
+import { componentVisible, resolveFormValues } from '../utils/formLogic';
 import {
   getCachedForm,
   enqueueRecord,
@@ -65,6 +65,8 @@ export default function FormCaptureScreen() {
   const [evidencePaths, setEvidencePaths] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState<Map<string, string>>(new Map());
+  // Valores por defecto y calculados (H03), igual que la web
+  const formValues = useMemo(() => resolveFormValues(pages, values), [pages, values]);
   const [signatureFieldId, setSignatureFieldId] = useState<string | null>(null);
   const [fingerprintFieldId, setFingerprintFieldId] = useState<string | null>(null);
   const [repeatCounts, setRepeatCounts] = useState<Record<string, number>>({});
@@ -347,7 +349,7 @@ export default function FormCaptureScreen() {
     if (!activeProjectId) return;
 
     // Validar todos los campos antes de guardar (incluye repeat groups)
-    const validationErrors = validateForm(pages, values, repeatCounts);
+    const validationErrors = validateForm(pages, formValues, repeatCounts);
     if (validationErrors.size > 0) {
       setErrors(validationErrors);
       Alert.alert(
@@ -364,7 +366,7 @@ export default function FormCaptureScreen() {
       const recordLocalId = uuidv4();
 
       // Construir valores para el Record Engine (doc 25)
-      const recordValues: RecordValue[] = Object.entries(withInterviewDuration(pages, values, startedAt.current)).map(
+      const recordValues: RecordValue[] = Object.entries(withInterviewDuration(pages, formValues, startedAt.current)).map(
         ([fieldId, val]) => ({
           field_id: fieldId,
           field_name: fieldId,
@@ -442,7 +444,7 @@ export default function FormCaptureScreen() {
     } finally {
       setSaving(false);
     }
-  }, [activeProjectId, formId, draftLocalId, values, repeatCounts, evidencePaths, gps, navigation]);
+  }, [activeProjectId, formId, draftLocalId, values, formValues, repeatCounts, evidencePaths, gps, navigation]);
 
   // Obtener secciones de la pagina actual
   const page = pages[currentPage];
@@ -459,7 +461,7 @@ export default function FormCaptureScreen() {
     }
   }
   const visibleNormalComponents = normalComponents.filter((comp) =>
-    isFieldVisible(comp.conditionalVisibility, values),
+    componentVisible(comp, formValues),
   );
 
   // Secciones repetibles de la pagina actual
@@ -497,7 +499,7 @@ export default function FormCaptureScreen() {
           for (const row of section.rows) {
             for (const col of row.columns) {
               for (const comp of col.components) {
-                if (!isFieldVisible(comp.conditionalVisibility, values)) continue;
+                if (!componentVisible(comp, formValues)) continue;
                 if (errors.has(comp.id)) hasErrors = true;
                 if (comp.required && (values[comp.id] === undefined || values[comp.id] === null || values[comp.id] === '')) {
                   allFilled = false;
@@ -575,7 +577,7 @@ export default function FormCaptureScreen() {
             }
           }
           const visibleComps = sectionComponents.filter((comp) =>
-            isFieldVisible(comp.conditionalVisibility, values),
+            componentVisible(comp, formValues),
           );
           if (visibleComps.length === 0) return null;
 

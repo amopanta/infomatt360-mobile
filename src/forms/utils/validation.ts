@@ -11,8 +11,8 @@
  */
 
 import type { FormComponent, FormPage, FormSection } from '../../types';
-import { isFieldVisible } from './conditionalVisibility';
-import { getRepeatFieldId, nestedSection } from '../components/RepeatGroupRenderer';
+import { componentVisible, constraintError } from './formLogic';
+import { getRepeatFieldId, nestedSection } from './repeatKeys';
 
 export interface ValidationError {
   fieldId: string;
@@ -57,11 +57,11 @@ export function validateForm(
   // 1. Validar campos normales (no repetibles)
   const components = getAllComponents(pages);
   for (const comp of components) {
-    if (!isFieldVisible(comp.conditionalVisibility, values)) {
+    if (!componentVisible(comp, values)) {
       continue;
     }
     const val = values[comp.id];
-    const error = validateField(comp, val);
+    const error = validateField(comp, val) ?? constraintError(comp, val, values);
     if (error) {
       errors.set(comp.id, error);
     }
@@ -106,22 +106,21 @@ function validateRepeatSection(
     for (const comp of sectionComponents) {
       const indexedId = getRepeatFieldId(sectionId, i, comp.id);
       // Visibilidad condicional dentro de la instancia
-      if (comp.conditionalVisibility) {
-        const instanceValues: Record<string, unknown> = {};
-        for (const c of sectionComponents) {
-          const k = getRepeatFieldId(sectionId, i, c.id);
-          if (values[k] !== undefined) instanceValues[c.id] = values[k];
-        }
-        if (!isFieldVisible(comp.conditionalVisibility, { ...values, ...instanceValues })) {
-          continue;
-        }
+      const instanceValues: Record<string, unknown> = {};
+      for (const c of sectionComponents) {
+        const k = getRepeatFieldId(sectionId, i, c.id);
+        if (values[k] !== undefined) instanceValues[c.id] = values[k];
+      }
+      const rowContext = { ...values, ...instanceValues };
+      if (!componentVisible(comp, rowContext)) {
+        continue;
       }
       if (comp.type === 'repeat') {
         validateRepeatSection(nestedSection(comp, indexedId), values, repeatCounts, errors);
         continue;
       }
       const val = values[indexedId];
-      const error = validateField(comp, val);
+      const error = validateField(comp, val) ?? constraintError(comp, val, rowContext);
       if (error) {
         errors.set(indexedId, error);
       }
@@ -134,6 +133,7 @@ export function validateField(
   comp: FormComponent,
   value: unknown,
 ): string | null {
+  if (comp.type === 'calculate' || comp.type === 'hidden') return null;
   const v = comp.validations ?? {};
 
   // Required

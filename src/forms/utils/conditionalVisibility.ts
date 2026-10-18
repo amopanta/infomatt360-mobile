@@ -8,6 +8,10 @@
 
 import type { ConditionalRule, ConditionalVisibility } from '../../types';
 
+function asText(value: unknown): string {
+  return Array.isArray(value) ? value.map(String).join(',') : String(value ?? '');
+}
+
 /** Evalua una regla individual contra los valores actuales */
 function evaluateRule(
   rule: ConditionalRule,
@@ -22,11 +26,13 @@ function evaluateRule(
     case 'notEmpty':
       return fieldValue !== undefined && fieldValue !== null && fieldValue !== '';
 
+    // Como la web: se compara como texto (true y 'true', 3 y '3' son iguales;
+    // una selección múltiple se une con comas).
     case 'eq':
-      return fieldValue === rule.value;
+      return asText(fieldValue) === asText(rule.value);
 
     case 'neq':
-      return fieldValue !== rule.value;
+      return asText(fieldValue) !== asText(rule.value);
 
     case 'gt':
       return typeof fieldValue === 'number' && typeof rule.value === 'number'

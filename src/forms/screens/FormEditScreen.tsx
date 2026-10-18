@@ -27,7 +27,7 @@ import PageProgressBar from '../components/PageProgressBar';
 import SignatureModal from '../components/SignatureModal';
 import FingerprintModal, { type FingerprintResult } from '../components/FingerprintModal';
 import { validateForm } from '../utils/validation';
-import { isFieldVisible } from '../utils/conditionalVisibility';
+import { componentVisible, resolveFormValues } from '../utils/formLogic';
 import {
   getCachedForm,
   getQueuedRecord,
@@ -55,6 +55,8 @@ export default function FormEditScreen() {
   const [newEvidencePaths, setNewEvidencePaths] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState<Map<string, string>>(new Map());
+  // Valores por defecto y calculados (H03), igual que la web
+  const formValues = useMemo(() => resolveFormValues(pages, values), [pages, values]);
   const [signatureFieldId, setSignatureFieldId] = useState<string | null>(null);
   const [fingerprintFieldId, setFingerprintFieldId] = useState<string | null>(null);
   const [repeatCounts, setRepeatCounts] = useState<Record<string, number>>({});
@@ -281,7 +283,7 @@ export default function FormEditScreen() {
   // Guardar cambios
   const handleSave = useCallback(async () => {
     // Validar antes de guardar (incluye repeat groups)
-    const validationErrors = validateForm(pages, values, repeatCounts);
+    const validationErrors = validateForm(pages, formValues, repeatCounts);
     if (validationErrors.size > 0) {
       setErrors(validationErrors);
       Alert.alert(
@@ -293,7 +295,7 @@ export default function FormEditScreen() {
 
     setSaving(true);
     try {
-      const recordValues: RecordValue[] = Object.entries(values).map(
+      const recordValues: RecordValue[] = Object.entries(formValues).map(
         ([fieldId, val]) => ({
           field_id: fieldId,
           field_name: fieldId,
@@ -319,7 +321,7 @@ export default function FormEditScreen() {
     } finally {
       setSaving(false);
     }
-  }, [recordLocalId, pages, values, repeatCounts, gps, newEvidencePaths, navigation]);
+  }, [recordLocalId, pages, values, formValues, repeatCounts, gps, newEvidencePaths, navigation]);
 
   // Secciones de la pagina actual
   const page = pages[currentPage];
@@ -357,7 +359,7 @@ export default function FormEditScreen() {
           for (const row of section.rows) {
             for (const col of row.columns) {
               for (const comp of col.components) {
-                if (!isFieldVisible(comp.conditionalVisibility, values)) continue;
+                if (!componentVisible(comp, formValues)) continue;
                 if (errors.has(comp.id)) hasErrors = true;
                 if (comp.required && (values[comp.id] === undefined || values[comp.id] === null || values[comp.id] === '')) {
                   allFilled = false;
@@ -435,7 +437,7 @@ export default function FormEditScreen() {
             }
           }
           const visibleComps = sectionComponents.filter((comp) =>
-            isFieldVisible(comp.conditionalVisibility, values),
+            componentVisible(comp, formValues),
           );
           if (visibleComps.length === 0) return null;
 

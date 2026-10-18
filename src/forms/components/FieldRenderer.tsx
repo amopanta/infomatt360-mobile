@@ -67,6 +67,11 @@ export default function FieldRenderer({
   const inputErrorStyle = hasError ? styles.inputError : undefined;
 
   switch (type) {
+    // Calculados u ocultos: no se dibujan; su valor sale de formLogic (H03)
+    case 'calculate':
+    case 'hidden':
+      return null;
+
     case 'text':
       return (
         <View style={styles.field}>

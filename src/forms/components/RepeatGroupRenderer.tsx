@@ -19,7 +19,7 @@ import {
   Alert,
 } from 'react-native';
 import FieldRenderer from './FieldRenderer';
-import { isFieldVisible } from '../utils/conditionalVisibility';
+import { componentVisible } from '../utils/formLogic';
 import type { FormSection, FormComponent } from '../../types';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
@@ -60,37 +60,9 @@ function getSectionComponents(section: FormSection): FormComponent[] {
   return components;
 }
 
-/** Sección sintética para un repeat anidado; su id es la clave de la fila padre. */
-export function nestedSection(comp: FormComponent, indexedId: string): FormSection {
-  return {
-    id: indexedId,
-    title: comp.label,
-    rows: [{ columns: [{ desktopWidth: 12, tabletWidth: 12, mobileWidth: 12, components: comp.children ?? [] }] }],
-    repeatable: true,
-    minRepetitions: comp.required ? 1 : 0,
-    maxRepetitions: 50,
-  };
-}
+import { getRepeatFieldId, nestedSection } from '../utils/repeatKeys';
 
-/** Genera el ID indexado para un campo en una instancia */
-export function getRepeatFieldId(sectionId: string, index: number, fieldId: string): string {
-  return `${sectionId}[${index}].${fieldId}`;
-}
-
-/** Detecta si un fieldId pertenece a un repeat group y extrae sus partes */
-export function parseRepeatFieldId(compositeId: string): {
-  sectionId: string;
-  index: number;
-  fieldId: string;
-} | null {
-  const match = compositeId.match(/^(.+)\[(\d+)\]\.(.+)$/);
-  if (!match) return null;
-  return {
-    sectionId: match[1],
-    index: parseInt(match[2], 10),
-    fieldId: match[3],
-  };
-}
+export { getRepeatFieldId, nestedSection, parseRepeatFieldId } from '../utils/repeatKeys';
 
 export default function RepeatGroupRenderer({
   section,
@@ -148,7 +120,6 @@ export default function RepeatGroupRenderer({
       {Array.from({ length: instanceCount }).map((_, idx) => {
         // Filtrar componentes visibles para esta instancia
         const visibleComponents = baseComponents.filter((comp) => {
-          if (!comp.conditionalVisibility) return true;
           // Para visibilidad condicional dentro de un repeat group,
           // verificar contra los valores indexados de esta instancia
           const instanceValues: Record<string, unknown> = {};
@@ -158,7 +129,7 @@ export default function RepeatGroupRenderer({
               instanceValues[c.id] = values[key];
             }
           }
-          return isFieldVisible(comp.conditionalVisibility, { ...values, ...instanceValues });
+          return componentVisible(comp, { ...values, ...instanceValues });
         });
 
         return (
