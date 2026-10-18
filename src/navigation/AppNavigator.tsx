@@ -41,7 +41,7 @@ import OfflineBanner from '../ui/OfflineBanner';
 import { useAuthStore } from '../store/authStore';
 import { useServerStore } from '../store/serverStore';
 import { getPendingCount } from '../db/database';
-import { onSyncStatusChange } from '../sync/syncService';
+import { onSyncStatusChange, startAutoSync } from '../sync/syncService';
 import { colors, fontSize } from '../ui/theme';
 
 const Stack = createNativeStackNavigator();
@@ -475,6 +475,14 @@ export default function AppNavigator() {
       setShowPinSetup(true);
     }
   }, [isLoggedIn, pinEnabled, unlocked]);
+
+  // Con sesión guardada (entrada con PIN, sin volver a escribir la clave) la
+  // sincronización automática también debe arrancar; antes solo lo hacía el
+  // login con usuario y contraseña.
+  const sessionReady = !loading && isLoggedIn && (!pinEnabled || unlocked);
+  useEffect(() => {
+    if (sessionReady) startAutoSync();
+  }, [sessionReady]);
 
   if (loading) {
     return (

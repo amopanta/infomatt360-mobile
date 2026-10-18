@@ -18,6 +18,7 @@ import {
   listPendingRecords,
   markRecordSynced,
   markRecordError,
+  noteSyncAttemptFailed,
   markRecordConflict,
   getRecordEvidence,
   getCachedForm,
@@ -60,6 +61,22 @@ export function getSyncStatus(): SyncStatus {
 export function startAutoSync(): void {
   if (syncTimer) return; // idempotente
   scheduleNext(0); // primer intento inmediato
+}
+
+/**
+ * Envía en cuanto se pueda, p. ej. justo después de guardar un registro:
+ * con red sincroniza ya; sin red no hace nada y lo enviará el ciclo
+ * automático o el aviso de reconexión (connectivityStore).
+ */
+export async function requestSync(): Promise<void> {
+  try {
+    const state = await Network.getNetworkStateAsync();
+    if (!state.isConnected || !state.isInternetReachable) return;
+  } catch {
+    return;
+  }
+  currentInterval = ENV.SYNC_INTERVAL_BASE;
+  await syncNow();
 }
 
 export function stopAutoSync(): void {
@@ -202,10 +219,17 @@ export async function syncNow(): Promise<boolean> {
           }
           hadFailures = true;
         } else {
-          // Error de red/HTTP: todo el grupo queda pendiente
           hadFailures = true;
+          const httpStatus: number | undefined = err?.response?.status;
           for (const rec of groupRecords) {
-            markRecordError(rec.local_id, err.message ?? 'Error de red');
+            if (httpStatus && httpStatus >= 400 && httpStatus < 500) {
+              // El servidor rechazó el lote (datos o permisos): requiere revisión.
+              markRecordError(rec.local_id, err?.response?.data?.detail ? String(JSON.stringify(err.response.data.detail)) : err.message ?? 'Rechazado por el servidor');
+            } else {
+              // Sin red, tiempo agotado o servidor caído: sigue pendiente y el
+              // ciclo automático lo reintenta (antes quedaba en error para siempre).
+              noteSyncAttemptFailed(rec.local_id, err?.message ?? 'Error de red');
+            }
           }
         }
       }
@@ -247,17 +271,51 @@ function toBackendValues(
   uploaded: Map<string, FileValue>,
   types: Map<string, string>,
 ): { field_name: string; field_value_json: string }[] {
-  const seen = new Set<string>();
-  const out: { field_name: string; field_value_json: string }[] = [];
+  const flat = new Map<string, unknown>();
   for (const v of values) {
     const name = v.field_name || v.field_id;
-    if (!name || seen.has(name)) continue;
-    seen.add(name);
+    if (!name || flat.has(name)) continue;
     const uri = localUriOf(v.field_value_json);
     let raw = uri && uploaded.has(uri) ? uploaded.get(uri) : v.field_value_json;
     // Sí/No se captura como texto 'true'/'false'; la web lo guarda como booleano.
-    if (types.get(name) === 'BOOLEAN' && (raw === 'true' || raw === 'false')) raw = raw === 'true';
-    out.push({ field_name: name, field_value_json: JSON.stringify(raw ?? null) });
+    // En grupos repetibles el tipo se busca por el nombre final ("...].acepta").
+    const leaf = name.slice(name.lastIndexOf('.') + 1);
+    if ((types.get(name) ?? types.get(leaf)) === 'BOOLEAN' && (raw === 'true' || raw === 'false')) raw = raw === 'true';
+    flat.set(name, raw ?? null);
+  }
+  const out: { field_name: string; field_value_json: string }[] = [];
+  for (const [name, value] of nestRepeatValues(flat)) {
+    out.push({ field_name: name, field_value_json: JSON.stringify(value) });
+  }
+  return out;
+}
+
+/**
+ * La app guarda cada campo de un grupo repetible con clave indexada
+ * ("integrantes[0].contactos[1].nombre"); el backend y la web esperan el
+ * grupo como lista de filas `[{id, index, values}]`, con los anidados dentro
+ * de su fila (frontend/src/modules/runtime/repeatEngine.ts).
+ */
+export function nestRepeatValues(flat: Map<string, unknown>): Map<string, unknown> {
+  const out = new Map<string, unknown>();
+  const groups = new Map<string, Map<number, Map<string, unknown>>>();
+  for (const [key, value] of flat) {
+    const match = /^([^[\]]+)\[(\d+)\]\.(.+)$/.exec(key);
+    if (!match) { out.set(key, value); continue; }
+    const [, group, index, rest] = match;
+    const rows = groups.get(group) ?? new Map<number, Map<string, unknown>>();
+    groups.set(group, rows);
+    const row = rows.get(Number(index)) ?? new Map<string, unknown>();
+    rows.set(Number(index), row);
+    row.set(rest, value);
+  }
+  for (const [group, rows] of groups) {
+    const ordered = [...rows.keys()].sort((a, b) => a - b);
+    out.set(group, ordered.map((index, position) => ({
+      id: `${group}_${index + 1}`,
+      index: position,
+      values: Object.fromEntries(nestRepeatValues(rows.get(index)!)),
+    })));
   }
   return out;
 }
@@ -287,9 +345,11 @@ function fieldTypesFor(templateId: string): Map<string, string> {
       for (const section of page.sections ?? []) {
         for (const row of section.rows ?? []) {
           for (const column of row.columns ?? []) {
-            for (const component of column.components ?? []) {
-              if (component.config?.backendType) types.set(component.id, component.config.backendType);
-            }
+            const visit = (component: any) => {
+              if (component?.config?.backendType) types.set(component.id, component.config.backendType);
+              for (const child of component?.children ?? []) visit(child);
+            };
+            for (const component of column.components ?? []) visit(component);
           }
         }
       }

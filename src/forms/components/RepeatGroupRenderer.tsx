@@ -43,6 +43,10 @@ interface RepeatGroupRendererProps {
   onCaptureSignature: (fieldId: string) => void;
   onScanDocument?: (fieldId: string) => void;
   onCaptureFingerprint?: (fieldId: string) => void;
+  /** Grupos anidados: cantidad de filas por clave (p. ej. "integrantes[0].contactos") */
+  repeatCounts?: Record<string, number>;
+  onAddNested?: (sectionId: string, maxReps: number, currentCount?: number) => void;
+  onRemoveNested?: (sectionId: string, index: number) => void;
 }
 
 /** Extrae todos los componentes de una seccion */
@@ -54,6 +58,18 @@ function getSectionComponents(section: FormSection): FormComponent[] {
     }
   }
   return components;
+}
+
+/** Sección sintética para un repeat anidado; su id es la clave de la fila padre. */
+export function nestedSection(comp: FormComponent, indexedId: string): FormSection {
+  return {
+    id: indexedId,
+    title: comp.label,
+    rows: [{ columns: [{ desktopWidth: 12, tabletWidth: 12, mobileWidth: 12, components: comp.children ?? [] }] }],
+    repeatable: true,
+    minRepetitions: comp.required ? 1 : 0,
+    maxRepetitions: 50,
+  };
 }
 
 /** Genera el ID indexado para un campo en una instancia */
@@ -89,6 +105,9 @@ export default function RepeatGroupRenderer({
   onCaptureSignature,
   onScanDocument,
   onCaptureFingerprint,
+  repeatCounts,
+  onAddNested,
+  onRemoveNested,
 }: RepeatGroupRendererProps) {
   const sectionId = section.id ?? section.title;
   const baseComponents = useMemo(() => getSectionComponents(section), [section]);
@@ -162,6 +181,31 @@ export default function RepeatGroupRenderer({
             {/* Campos de esta instancia */}
             {visibleComponents.map((comp) => {
               const indexedId = getRepeatFieldId(sectionId, idx, comp.id);
+              if (comp.type === 'repeat') {
+                // Repeat dentro de repeat: sus filas cuelgan de esta fila, así
+                // cada contacto sigue perteneciendo a su integrante.
+                const nested = nestedSection(comp, indexedId);
+                return (
+                  <RepeatGroupRenderer
+                    key={indexedId}
+                    section={nested}
+                    instanceCount={repeatCounts?.[indexedId] ?? (nested.minRepetitions ?? 0)}
+                    values={values}
+                    errors={errors}
+                    onChange={onChange}
+                    onAddInstance={() => onAddNested?.(indexedId, nested.maxRepetitions ?? 50, repeatCounts?.[indexedId] ?? (nested.minRepetitions ?? 0))}
+                    onRemoveInstance={(i) => onRemoveNested?.(indexedId, i)}
+                    onCapturePhoto={onCapturePhoto}
+                    onCaptureGps={onCaptureGps}
+                    onCaptureSignature={onCaptureSignature}
+                    onScanDocument={onScanDocument}
+                    onCaptureFingerprint={onCaptureFingerprint}
+                    repeatCounts={repeatCounts}
+                    onAddNested={onAddNested}
+                    onRemoveNested={onRemoveNested}
+                  />
+                );
+              }
               return (
                 <FieldRenderer
                   key={indexedId}

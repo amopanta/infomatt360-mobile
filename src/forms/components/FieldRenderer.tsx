@@ -49,6 +49,9 @@ export default function FieldRenderer({
   const { id, type, label, required, options } = component;
   const hasError = !!error;
   const [showDatePicker, setShowDatePicker] = useState(false);
+  // Selector de hora / fecha-hora: qué paso está abierto y el día ya elegido.
+  const [timeStep, setTimeStep] = useState<'date' | 'time' | null>(null);
+  const [pendingDate, setPendingDate] = useState<Date | null>(null);
 
   const renderLabel = () => (
     <Text style={styles.label}>
@@ -84,8 +87,10 @@ export default function FieldRenderer({
           <TextInput
             style={[styles.input, inputErrorStyle]}
             value={value != null ? String(value) : ''}
-            onChangeText={(text) => onChange(id, text ? Number(text) : null)}
-            keyboardType="numeric"
+            // Mientras se escribe ('1,' o '-') se conserva el texto: convertir en
+            // cada tecla borraba la coma y hacía imposible escribir decimales.
+            onChangeText={(text) => onChange(id, parseNumberInput(text))}
+            keyboardType="decimal-pad"
             placeholder="0"
           />
           {renderError()}
@@ -412,6 +417,100 @@ export default function FieldRenderer({
       );
     }
 
+    case 'time':
+    case 'datetime': {
+      // Hora 'HH:MM' y fecha-hora 'YYYY-MM-DDTHH:MM', mismo formato que la web
+      // (input time / datetime-local). Android no tiene selector de fecha y
+      // hora juntos: en 'datetime' se elige primero el día y luego la hora.
+      const current = parseLocalDateTime(value, type);
+      const display = !current
+        ? ''
+        : type === 'time'
+          ? toLocalTime(current)
+          : `${current.toLocaleDateString('es-CO', { year: 'numeric', month: '2-digit', day: '2-digit' })} ${toLocalTime(current)}`;
+      const step = timeStep;
+      const handlePicked = (_event: DateTimePickerChangeEvent, picked: Date) => {
+        if (type === 'datetime' && step === 'date') {
+          setPendingDate(picked);
+          setTimeStep('time');
+          return;
+        }
+        setTimeStep(null);
+        const base = type === 'datetime' ? pendingDate ?? picked : picked;
+        const merged = new Date(base.getFullYear(), base.getMonth(), base.getDate(), picked.getHours(), picked.getMinutes());
+        onChange(id, type === 'time' ? toLocalTime(merged) : `${toLocalIsoDate(merged)}T${toLocalTime(merged)}`);
+      };
+      return (
+        <View style={styles.field}>
+          {renderLabel()}
+          <TouchableOpacity
+            style={[styles.input, styles.dateInput, inputErrorStyle]}
+            onPress={() => setTimeStep(type === 'datetime' ? 'date' : 'time')}
+          >
+            <Text style={display ? styles.dateText : styles.datePlaceholder}>
+              {display || (type === 'time' ? 'Seleccionar hora' : 'Seleccionar fecha y hora')}
+            </Text>
+          </TouchableOpacity>
+          {step && (
+            <DateTimePicker
+              value={current ?? new Date()}
+              mode={step}
+              is24Hour
+              display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+              onValueChange={handlePicked}
+              onDismiss={() => setTimeStep(null)}
+              locale="es"
+            />
+          )}
+          {renderError()}
+        </View>
+      );
+    }
+
+    case 'ranking': {
+      // Se guarda la lista de valores en el orden elegido (primero = más importante).
+      const order = Array.isArray(value) && value.length ? (value as string[]) : (options ?? []).map((o) => o.value);
+      const labels = new Map((options ?? []).map((o) => [o.value, o.label]));
+      const move = (from: number, to: number) => {
+        const next = [...order];
+        const [moved] = next.splice(from, 1);
+        next.splice(to, 0, moved);
+        onChange(id, next);
+      };
+      return (
+        <View style={styles.field}>
+          {renderLabel()}
+          <Text style={styles.hint}>Use ↑ ↓ para ordenar de más a menos importante.</Text>
+          {order.map((item, index) => (
+            <View key={item} style={styles.rankRow}>
+              <Text style={styles.rankText}>{index + 1}. {labels.get(item) ?? item}</Text>
+              <TouchableOpacity accessibilityLabel="Subir" disabled={index === 0} style={[styles.rankButton, index === 0 && styles.rankButtonDisabled]} onPress={() => move(index, index - 1)}>
+                <Text style={styles.rankButtonText}>↑</Text>
+              </TouchableOpacity>
+              <TouchableOpacity accessibilityLabel="Bajar" disabled={index === order.length - 1} style={[styles.rankButton, index === order.length - 1 && styles.rankButtonDisabled]} onPress={() => move(index, index + 1)}>
+                <Text style={styles.rankButtonText}>↓</Text>
+              </TouchableOpacity>
+            </View>
+          ))}
+          {renderError()}
+        </View>
+      );
+    }
+
+    case 'webonly':
+      // Matriz, subformulario enlazado o vínculo a otro registro: necesitan
+      // consultar otros registros o una estructura que la app aún no pinta.
+      return (
+        <View style={styles.field}>
+          {renderLabel()}
+          <Text style={styles.unsupported}>Este campo se completa desde la versión web.</Text>
+        </View>
+      );
+
+    case 'auto':
+      // Duración de la entrevista: la app la registra sola al enviar.
+      return null;
+
     default:
       return (
         <View style={styles.field}>
@@ -422,6 +521,26 @@ export default function FieldRenderer({
         </View>
       );
   }
+}
+
+/** Hora local 'HH:MM'. */
+function toLocalTime(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** 'HH:MM' o 'YYYY-MM-DDTHH:MM' → Date local, sin desfase de zona horaria. */
+function parseLocalDateTime(value: unknown, type: 'time' | 'datetime'): Date | undefined {
+  if (typeof value !== 'string' || !value) return undefined;
+  if (type === 'time') {
+    const m = /^(\d{2}):(\d{2})/.exec(value);
+    if (!m) return undefined;
+    const d = new Date();
+    d.setHours(Number(m[1]), Number(m[2]), 0, 0);
+    return d;
+  }
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(value);
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5])) : undefined;
 }
 
 const styles = StyleSheet.create({
@@ -696,6 +815,39 @@ const styles = StyleSheet.create({
     color: colors.warning,
     fontStyle: 'italic',
   },
+  hint: {
+    fontSize: fontSize.caption,
+    color: colors.textSecondary,
+    marginBottom: spacing.sm,
+  },
+  rankRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.xs,
+  },
+  rankText: {
+    flex: 1,
+    fontSize: fontSize.body,
+    color: colors.textPrimary,
+  },
+  rankButton: {
+    width: 40,
+    height: 40,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rankButtonDisabled: {
+    opacity: 0.3,
+  },
+  rankButtonText: {
+    fontSize: fontSize.body,
+    color: colors.primary,
+    fontWeight: '700',
+  },
 });
 
 /** 'YYYY-MM-DD' → Date local (sin desfase de zona horaria). */
@@ -710,4 +862,13 @@ function parseLocalDate(value: unknown): Date | undefined {
 function toLocalIsoDate(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/** Texto de un campo numérico → número si está completo (acepta coma decimal,
+ * '1,5' → 1.5); si no, el texto tal cual para que validation.ts lo marque. */
+export function parseNumberInput(text: string): number | string | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  if (/^-?\d+([.,]\d+)?$/.test(trimmed)) return Number(trimmed.replace(',', '.'));
+  return text;
 }

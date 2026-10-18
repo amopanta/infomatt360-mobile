@@ -38,6 +38,7 @@ import {
   deleteAutoDraft,
 } from '../../db/database';
 import { useAuthStore } from '../../store/authStore';
+import { requestSync } from '../../sync/syncService';
 import type { FormPage, FormSection, FormComponent, GpsCoordinate, RecordValue } from '../../types';
 import { compressImage, FIELD_CAMERA_OPTIONS } from '../../utils/imageCompressor';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
@@ -61,6 +62,8 @@ export default function FormCaptureScreen() {
   const [fingerprintFieldId, setFingerprintFieldId] = useState<string | null>(null);
   const [repeatCounts, setRepeatCounts] = useState<Record<string, number>>({});
   const draftLocalId = useRef(uuidv4()).current;
+  // Inicio de la captura, para la duración de la entrevista (INTERVIEW_DURATION).
+  const startedAt = useRef(Date.now());
   const submittedRef = useRef(false);
 
   // Cargar formulario desde cache SQLite
@@ -256,53 +259,41 @@ export default function FormCaptureScreen() {
     [navigation, handleFieldChange],
   );
 
-  // Repeat group: agregar instancia
-  const handleAddRepeatInstance = useCallback((sectionId: string, maxReps: number) => {
+  // Repeat group: agregar instancia. `currentCount` es lo que se ve en
+  // pantalla, para grupos anidados que aún no tienen contador propio.
+  const handleAddRepeatInstance = useCallback((sectionId: string, maxReps: number, currentCount?: number) => {
     setRepeatCounts((prev) => {
-      const current = prev[sectionId] ?? 1;
+      const current = prev[sectionId] ?? currentCount ?? 1;
       if (current >= maxReps) return prev;
       return { ...prev, [sectionId]: current + 1 };
     });
   }, []);
 
-  // Repeat group: eliminar instancia y reasignar valores
-  const handleRemoveRepeatInstance = useCallback((sectionId: string, index: number, components: FormComponent[]) => {
-    setRepeatCounts((prev) => {
-      const current = prev[sectionId] ?? 1;
-      return { ...prev, [sectionId]: Math.max(1, current - 1) };
-    });
-    // Reasignar valores: mover indices posteriores hacia abajo
-    setValues((prev) => {
-      const next = { ...prev };
-      const count = repeatCounts[sectionId] ?? 1;
-      // Eliminar valores de la instancia borrada
-      for (const comp of components) {
-        delete next[getRepeatFieldId(sectionId, index, comp.id)];
+  // Repeat group: eliminar instancia y correr hacia arriba las siguientes.
+  // Trabaja por prefijo de clave ("grupo[3]...") para mover también los
+  // valores y contadores de los grupos anidados dentro de cada fila.
+  const handleRemoveRepeatInstance = useCallback((sectionId: string, index: number) => {
+    const prefix = `${sectionId}[`;
+    const shiftKey = (key: string): string | null => {
+      if (!key.startsWith(prefix)) return key;
+      const match = key.slice(prefix.length).match(/^(\d+)\](.*)$/);
+      if (!match) return key;
+      const i = Number(match[1]);
+      if (i === index) return null;
+      return i < index ? key : `${prefix}${i - 1}]${match[2]}`;
+    };
+    function remap<T>(entries: [string, T][]): Record<string, T> {
+      const out: Record<string, T> = {};
+      for (const [key, value] of entries) {
+        const next = shiftKey(key);
+        if (next !== null) out[next] = value;
       }
-      // Mover instancias posteriores una posicion hacia abajo
-      for (let i = index + 1; i < count; i++) {
-        for (const comp of components) {
-          const oldKey = getRepeatFieldId(sectionId, i, comp.id);
-          const newKey = getRepeatFieldId(sectionId, i - 1, comp.id);
-          if (next[oldKey] !== undefined) {
-            next[newKey] = next[oldKey];
-          }
-          delete next[oldKey];
-        }
-      }
-      return next;
-    });
-    // Limpiar errores de la instancia
-    setErrors((prev) => {
-      const next = new Map(prev);
-      for (const key of next.keys()) {
-        if (key.startsWith(`${sectionId}[`)) {
-          next.delete(key);
-        }
-      }
-      return next;
-    });
-  }, [repeatCounts]);
+      return out;
+    }
+    setValues((prev) => remap(Object.entries(prev)));
+    setRepeatCounts((prev) => ({ ...remap(Object.entries(prev)), [sectionId]: Math.max(0, (prev[sectionId] ?? 1) - 1) }));
+    setErrors((prev) => new Map(Object.entries(remap([...prev.entries()]))));
+  }, []);
 
   const handleSignatureSave = useCallback(
     (signatureBase64: string) => {
@@ -361,7 +352,7 @@ export default function FormCaptureScreen() {
       const recordLocalId = uuidv4();
 
       // Construir valores para el Record Engine (doc 25)
-      const recordValues: RecordValue[] = Object.entries(values).map(
+      const recordValues: RecordValue[] = Object.entries(withInterviewDuration(pages, values, startedAt.current)).map(
         ([fieldId, val]) => ({
           field_id: fieldId,
           field_name: fieldId,
@@ -393,6 +384,10 @@ export default function FormCaptureScreen() {
           fileSize: 0, // se actualizara al subir
         });
       }
+
+      // Envío automático, ya con las evidencias registradas: si hay señal sale
+      // ya; si no, lo envía el ciclo automático o el aviso de reconexión.
+      void requestSync();
 
       Alert.alert(
         'Registro guardado',
@@ -552,16 +547,11 @@ export default function FormCaptureScreen() {
                 values={values}
                 errors={errors}
                 onChange={handleFieldChange}
-                onAddInstance={() => handleAddRepeatInstance(sectionId, section.maxRepetitions ?? 50)}
-                onRemoveInstance={(index) => {
-                  const comps: FormComponent[] = [];
-                  for (const row of section.rows) {
-                    for (const col of row.columns) {
-                      comps.push(...col.components);
-                    }
-                  }
-                  handleRemoveRepeatInstance(sectionId, index, comps);
-                }}
+                onAddInstance={() => handleAddRepeatInstance(sectionId, section.maxRepetitions ?? 50, repeatCounts[sectionId] ?? (section.minRepetitions ?? 1))}
+                onRemoveInstance={(index) => handleRemoveRepeatInstance(sectionId, index)}
+                repeatCounts={repeatCounts}
+                onAddNested={handleAddRepeatInstance}
+                onRemoveNested={handleRemoveRepeatInstance}
                 onCapturePhoto={handleCapturePhoto}
                 onCaptureGps={handleCaptureGps}
                 onCaptureSignature={handleCaptureSignature}
@@ -733,3 +723,21 @@ const styles = StyleSheet.create({
     backgroundColor: colors.disabled,
   },
 });
+
+/** Segundos desde que se abrió la captura en cada campo INTERVIEW_DURATION. */
+function withInterviewDuration(pages: FormPage[], values: Record<string, unknown>, startedAt: number): Record<string, unknown> {
+  const seconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+  const next = { ...values };
+  for (const page of pages) {
+    for (const section of page.sections) {
+      for (const row of section.rows) {
+        for (const col of row.columns) {
+          for (const comp of col.components) {
+            if ((comp.config as any)?.backendType === 'INTERVIEW_DURATION') next[comp.id] = seconds;
+          }
+        }
+      }
+    }
+  }
+  return next;
+}

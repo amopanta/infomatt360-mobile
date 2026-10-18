@@ -233,6 +233,12 @@ export function markRecordError(localId: string, error: string): void {
   );
 }
 
+/** Intento fallido por red: el registro sigue pendiente, solo se anota el motivo. */
+export function noteSyncAttemptFailed(localId: string, message: string): void {
+  const db = getDatabase();
+  db.runSync(`UPDATE queued_records SET error_message = ? WHERE local_id = ? AND status = 'pending'`, [message, localId]);
+}
+
 export function resetErrorRecords(): void {
   const db = getDatabase();
   db.runSync(`UPDATE queued_records SET status = 'pending', error_message = NULL WHERE status = 'error'`);

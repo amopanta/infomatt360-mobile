@@ -70,6 +70,9 @@ export interface FormComponent {
   validations?: Record<string, unknown>;
   config?: Record<string, unknown>;
   conditionalVisibility?: ConditionalVisibility;
+  /** Solo en type 'repeat': campos de un grupo repetible anidado dentro de
+   * la fila de otro grupo (repeat dentro de repeat en XLSForm). */
+  children?: FormComponent[];
 }
 
 export interface FormColumn {
