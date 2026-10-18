@@ -2,7 +2,7 @@
  * Pantalla de exportacion de datos.
  *
  * Permite al usuario:
- *   - Seleccionar formato (CSV o JSON)
+ *   - Seleccionar formato (Excel, CSV o JSON)
  *   - Filtrar por estado (todos, pendientes, sincronizados, etc.)
  *   - Exportar y compartir el archivo generado
  *   - Ver y gestionar exportaciones anteriores
@@ -42,9 +42,15 @@ const STATUS_OPTIONS: { value: StatusFilter; label: string }[] = [
   { value: 'conflict', label: 'Conflictos' },
 ];
 
+const FORMAT_OPTIONS: { value: ExportFormat; label: string }[] = [
+  { value: 'xlsx', label: 'Excel' },
+  { value: 'csv', label: 'CSV' },
+  { value: 'json', label: 'JSON' },
+];
+
 export default function ExportScreen() {
   const { activeProjectId } = useAuthStore();
-  const [format, setFormat] = useState<ExportFormat>('csv');
+  const [format, setFormat] = useState<ExportFormat>('xlsx');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [exporting, setExporting] = useState(false);
   const [previousExports, setPreviousExports] = useState<
@@ -127,7 +133,7 @@ export default function ExportScreen() {
   }: {
     item: { name: string; uri: string; size: number; modTime: number };
   }) => {
-    const isCSV = item.name.endsWith('.csv');
+    const isTable = /\.(xlsx|csv)$/.test(item.name);
     const date = item.modTime > 0
       ? new Date(item.modTime * 1000).toLocaleString()
       : 'Desconocida';
@@ -135,7 +141,7 @@ export default function ExportScreen() {
     return (
       <View style={styles.fileCard}>
         <View style={styles.fileInfo}>
-          <Text style={styles.fileIcon}>{isCSV ? '📊' : '📄'}</Text>
+          <Text style={styles.fileIcon}>{isTable ? '📊' : '📄'}</Text>
           <View style={styles.fileDetails}>
             <Text style={styles.fileName} numberOfLines={1}>
               {item.name}
@@ -169,26 +175,17 @@ export default function ExportScreen() {
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Formato</Text>
         <View style={styles.toggleRow}>
-          <TouchableOpacity
-            style={[styles.toggleBtn, format === 'csv' && styles.toggleBtnActive]}
-            onPress={() => setFormat('csv')}
-          >
-            <Text
-              style={[styles.toggleBtnText, format === 'csv' && styles.toggleBtnTextActive]}
+          {FORMAT_OPTIONS.map((opt) => (
+            <TouchableOpacity
+              key={opt.value}
+              style={[styles.toggleBtn, format === opt.value && styles.toggleBtnActive]}
+              onPress={() => setFormat(opt.value)}
             >
-              CSV (Excel)
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.toggleBtn, format === 'json' && styles.toggleBtnActive]}
-            onPress={() => setFormat('json')}
-          >
-            <Text
-              style={[styles.toggleBtnText, format === 'json' && styles.toggleBtnTextActive]}
-            >
-              JSON
-            </Text>
-          </TouchableOpacity>
+              <Text style={[styles.toggleBtnText, format === opt.value && styles.toggleBtnTextActive]}>
+                {opt.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
         </View>
       </View>
 
@@ -221,7 +218,7 @@ export default function ExportScreen() {
           <ActivityIndicator color={colors.textOnPrimary} />
         ) : (
           <Text style={styles.exportButtonText}>
-            Exportar como {format.toUpperCase()}
+            Exportar como {FORMAT_OPTIONS.find((o) => o.value === format)?.label ?? format}
           </Text>
         )}
       </TouchableOpacity>

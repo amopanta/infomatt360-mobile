@@ -25,12 +25,17 @@ import { useServerStore } from '../../store/serverStore';
 import { ENV } from '../../config/env';
 import { getDeviceFingerprint } from '../../utils/deviceFingerprint';
 import { startAutoSync } from '../../sync/syncService';
+import BrandHeader from '../../ui/BrandHeader';
+import { useBrandingStore } from '../../store/brandingStore';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
 export default function LoginScreen() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [orgSlug, setOrgSlug] = useState('');
+  const branding = useBrandingStore((s) => s.branding);
+  const refreshBranding = useBrandingStore((s) => s.refresh);
+  // Organización recordada: la última con la que se vio la marca.
+  const [orgSlug, setOrgSlug] = useState(branding?.slug && branding.slug !== 'default' ? branding.slug : '');
   const [loading, setLoading] = useState(false);
   const [showServerConfig, setShowServerConfig] = useState(false);
   const [serverUrl, setServerUrl] = useState('');
@@ -112,6 +117,7 @@ export default function LoginScreen() {
     const session = await getSession();
     setSession(session);
     startAutoSync();
+    void refreshBranding(orgSlug.trim() || undefined);
   };
 
   // ── Formulario MFA ──────────────────────────────────────────────
@@ -161,8 +167,7 @@ export default function LoginScreen() {
         keyboardShouldPersistTaps="handled"
       >
         <View style={styles.card}>
-          <Text style={styles.title}>InfoMatt360</Text>
-          <Text style={styles.subtitle}>Aplicacion de Campo</Text>
+          <BrandHeader subtitle="Aplicación de campo" />
 
           {/* Indicador del servidor actual */}
           <TouchableOpacity
@@ -226,6 +231,8 @@ export default function LoginScreen() {
             placeholder="Organizacion (opcional)"
             value={orgSlug}
             onChangeText={setOrgSlug}
+            // Al terminar de escribir la organización se muestra su logo y nombre.
+            onEndEditing={() => { if (orgSlug.trim()) void refreshBranding(orgSlug); }}
             autoCapitalize="none"
             autoCorrect={false}
           />

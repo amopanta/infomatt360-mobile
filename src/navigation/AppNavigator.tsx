@@ -40,6 +40,7 @@ import ExportScreen from '../sync/ExportScreen';
 import OfflineBanner from '../ui/OfflineBanner';
 import { useAuthStore } from '../store/authStore';
 import { useServerStore } from '../store/serverStore';
+import { useBrandingStore } from '../store/brandingStore';
 import { getPendingCount } from '../db/database';
 import { onSyncStatusChange, startAutoSync } from '../sync/syncService';
 import { colors, fontSize } from '../ui/theme';
@@ -458,12 +459,18 @@ export default function AppNavigator() {
   const { accessToken, session, activeProjectId, hydrate } = useAuthStore();
   const { pinEnabled, unlocked, hydrate: hydratePin } = usePinStore();
   const { hydrate: hydrateServer } = useServerStore();
+  const hydrateBranding = useBrandingStore((s) => s.hydrate);
+  const refreshBranding = useBrandingStore((s) => s.refresh);
   const [loading, setLoading] = useState(true);
   const [showPinSetup, setShowPinSetup] = useState(false);
 
   useEffect(() => {
-    Promise.all([hydrate(), hydratePin(), hydrateServer()]).finally(() => setLoading(false));
-  }, [hydrate, hydratePin, hydrateServer]);
+    Promise.all([hydrate(), hydratePin(), hydrateServer(), hydrateBranding()]).finally(() => {
+      setLoading(false);
+      // Marca guardada al instante; luego se actualiza desde el servidor si hay red.
+      void refreshBranding();
+    });
+  }, [hydrate, hydratePin, hydrateServer, hydrateBranding, refreshBranding]);
 
   const isLoggedIn = !!accessToken;
 

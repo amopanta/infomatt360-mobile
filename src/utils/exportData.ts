@@ -1,20 +1,23 @@
 /**
- * Utilidad de exportacion de datos a CSV y JSON.
+ * Utilidad de exportacion de datos a Excel, CSV y JSON.
  *
  * Genera archivos exportables en el directorio de documentos
- * del dispositivo, listos para compartir via Share API nativa.
+ * del dispositivo, listos para compartir con la hoja nativa.
  *
  * Formatos soportados:
+ *   - XLSX: libro de Excel con encabezados legibles (etiquetas de las preguntas)
+ *   - CSV: misma tabla, separada por comas (con BOM para Excel)
  *   - JSON: exportacion completa con estructura preservada
- *   - CSV: tabla plana con columnas de campos dinamicos
  */
 
 import * as FileSystem from 'expo-file-system/legacy';
-import { Share, Platform } from 'react-native';
+import * as Sharing from 'expo-sharing';
+import { Share } from 'react-native';
 import { listAllRecords, getCachedForm } from '../db/database';
-import type { RecordValue } from '../types';
+import type { FormComponent, FormPage, RecordValue } from '../types';
+import { buildXlsxBase64, type XlsxCell } from './xlsxWriter';
 
-export type ExportFormat = 'json' | 'csv';
+export type ExportFormat = 'xlsx' | 'csv' | 'json';
 
 export interface ExportOptions {
   format: ExportFormat;
@@ -33,6 +36,12 @@ export interface ExportResult {
   recordCount: number;
 }
 
+const MIME: Record<ExportFormat, string> = {
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  csv: 'text/csv',
+  json: 'application/json',
+};
+
 /**
  * Genera la exportacion y retorna la ruta del archivo.
  */
@@ -45,167 +54,140 @@ export async function exportRecords(options: ExportOptions): Promise<ExportResul
     toDate: options.toDate,
   });
 
-  const filtered = records;
-
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+  const formName = options.templateId ? getCachedForm(options.templateId)?.name : undefined;
   const templateName = options.templateId
-    ? getCachedForm(options.templateId)?.name?.replace(/[^a-zA-Z0-9]/g, '_') ?? `form_${options.templateId}`
+    ? formName?.replace(/[^a-zA-Z0-9]/g, '_') ?? `form_${options.templateId}`
     : 'todos';
 
-  if (options.format === 'json') {
-    return exportAsJson(filtered, templateName, timestamp);
-  } else {
-    return exportAsCsv(filtered, templateName, timestamp);
-  }
+  if (options.format === 'json') return exportAsJson(records, templateName, timestamp);
+  const rows = buildTable(records);
+  if (options.format === 'xlsx') return exportAsXlsx(rows, formName ?? 'Registros', templateName, timestamp);
+  return exportAsCsv(rows, templateName, timestamp);
 }
 
-// ── JSON ──────────────────────────────────────────────────────────────
+// ── Tabla común (CSV / Excel) ─────────────────────────────────────────
 
-async function exportAsJson(
-  records: ReturnType<typeof listAllRecords>,
-  templateName: string,
-  timestamp: string,
-): Promise<ExportResult> {
-  const exportData = records.map((rec) => {
-    const values: RecordValue[] = JSON.parse(rec.data_json);
-    const gps = rec.gps_json ? JSON.parse(rec.gps_json) : null;
+type ExportRecord = ReturnType<typeof listAllRecords>[number];
 
-    return {
-      local_id: rec.local_id,
-      project_id: rec.project_id,
-      template_id: rec.template_id,
-      participant_id: rec.participant_id,
-      status: rec.status,
-      gps,
-      values: values.map((v) => ({
-        field_id: v.field_id,
-        field_name: v.field_name,
-        value: v.field_value_json,
-      })),
-      created_at: rec.created_at,
-      synced_at: rec.synced_at,
-    };
+const STATUS_LABELS: Record<string, string> = {
+  pending: 'Pendiente', syncing: 'Enviando', synced: 'Sincronizado', error: 'Con error', conflict: 'En conflicto', draft: 'Borrador',
+};
+
+/** field_id → etiqueta de la pregunta, según las plantillas guardadas en el teléfono. */
+function labelsFor(templateIds: string[]): Map<string, string> {
+  const labels = new Map<string, string>();
+  const visit = (component: FormComponent) => {
+    labels.set(component.id, component.label);
+    for (const child of component.children ?? []) visit(child);
+  };
+  for (const templateId of templateIds) {
+    const cached = getCachedForm(templateId);
+    if (!cached) continue;
+    try {
+      for (const page of JSON.parse(cached.schema_json) as FormPage[]) {
+        for (const section of page.sections) {
+          if (section.repeatable && section.id) labels.set(section.id, section.title);
+          for (const row of section.rows) for (const col of row.columns) col.components.forEach(visit);
+        }
+      }
+    } catch {
+      // Plantilla con formato antiguo: se usa el nombre técnico como título
+    }
+  }
+  return labels;
+}
+
+/** "integrantes[0].contactos[1].nombre" → "Integrantes 1 · Contactos 2 · Nombre" */
+function columnTitle(fieldId: string, labels: Map<string, string>): string {
+  const parts = fieldId.split('.');
+  return parts
+    .map((part) => {
+      const match = /^(.+)\[(\d+)\]$/.exec(part);
+      if (match) return `${labels.get(match[1]) ?? match[1]} ${Number(match[2]) + 1}`;
+      return labels.get(part) ?? part;
+    })
+    .join(' · ');
+}
+
+function buildTable(records: ExportRecord[]): XlsxCell[][] {
+  const fieldIds: string[] = [];
+  const seen = new Set<string>();
+  const parsed = records.map((meta) => {
+    const values: RecordValue[] = JSON.parse(meta.data_json);
+    for (const v of values) {
+      if (!seen.has(v.field_id)) { seen.add(v.field_id); fieldIds.push(v.field_id); }
+    }
+    return { meta, values };
   });
+  const labels = labelsFor([...new Set(records.map((r) => r.template_id))]);
 
-  const json = JSON.stringify(
-    {
-      exported_at: new Date().toISOString(),
-      record_count: exportData.length,
-      records: exportData,
-    },
-    null,
-    2,
-  );
+  const header: XlsxCell[] = [
+    'ID local', 'Proyecto', 'Formulario', 'Participante', 'Estado',
+    'Latitud', 'Longitud', 'Precisión GPS (m)', 'Creado', 'Sincronizado',
+    ...fieldIds.map((id) => columnTitle(id, labels)),
+  ];
+  const body = parsed.map(({ meta, values }) => {
+    const gps = meta.gps_json ? JSON.parse(meta.gps_json) : null;
+    const valueMap = new Map(values.map((v) => [v.field_id, v.field_value_json]));
+    return [
+      meta.local_id,
+      meta.project_id,
+      getCachedForm(meta.template_id)?.name ?? meta.template_id,
+      meta.participant_id ?? '',
+      STATUS_LABELS[meta.status] ?? meta.status,
+      gps?.lat ?? '',
+      gps?.lng ?? '',
+      gps?.accuracy ?? '',
+      meta.created_at,
+      meta.synced_at ?? '',
+      ...fieldIds.map((id) => cellValue(valueMap.get(id))),
+    ] as XlsxCell[];
+  });
+  return [header, ...body];
+}
 
-  const fileName = `infomatt360_${templateName}_${timestamp}.json`;
+/** Valor de campo → celda: números como número, el resto como texto legible. */
+function cellValue(val: unknown): XlsxCell {
+  if (val === null || val === undefined) return '';
+  if (typeof val === 'number') return val;
+  if (typeof val === 'boolean') return val ? 'Sí' : 'No';
+  if (val === 'true') return 'Sí';
+  if (val === 'false') return 'No';
+  if (typeof val === 'string') return val;
+  if (Array.isArray(val)) return val.map((item) => String(cellValue(item))).join(', ');
+  if (typeof val === 'object') {
+    const obj = val as Record<string, unknown>;
+    if ('lat' in obj && 'lng' in obj) return `${obj.lat}, ${obj.lng}`;
+    if ('dataUri' in obj) return obj.type === 'fingerprint' ? '[huella]' : '[firma]';
+    if ('uri' in obj || 'fileUri' in obj) return '[archivo]';
+    if ('file_asset_id' in obj) return String(obj.name ?? '[archivo]');
+    return JSON.stringify(val);
+  }
+  return String(val);
+}
+
+// ── Excel ─────────────────────────────────────────────────────────────
+
+async function exportAsXlsx(rows: XlsxCell[][], sheetName: string, templateName: string, timestamp: string): Promise<ExportResult> {
+  const fileName = `infomatt360_${templateName}_${timestamp}.xlsx`;
   const filePath = `${FileSystem.documentDirectory}${fileName}`;
-  await FileSystem.writeAsStringAsync(filePath, json, {
-    encoding: FileSystem.EncodingType.UTF8,
+  await FileSystem.writeAsStringAsync(filePath, buildXlsxBase64(sheetName, rows), {
+    encoding: FileSystem.EncodingType.Base64,
   });
-
-  return { filePath, fileName, recordCount: exportData.length };
+  return { filePath, fileName, recordCount: rows.length - 1 };
 }
 
 // ── CSV ───────────────────────────────────────────────────────────────
 
-async function exportAsCsv(
-  records: ReturnType<typeof listAllRecords>,
-  templateName: string,
-  timestamp: string,
-): Promise<ExportResult> {
-  // Recolectar todos los campos unicos para las columnas
-  const fieldColumns = new Map<string, string>(); // field_id → field_name
-  const parsedRecords: {
-    meta: ReturnType<typeof listAllRecords>[0];
-    values: RecordValue[];
-  }[] = [];
-
-  for (const rec of records) {
-    const values: RecordValue[] = JSON.parse(rec.data_json);
-    parsedRecords.push({ meta: rec, values });
-    for (const v of values) {
-      if (!fieldColumns.has(v.field_id)) {
-        fieldColumns.set(v.field_id, v.field_name || v.field_id);
-      }
-    }
-  }
-
-  // Construir encabezados
-  const fixedHeaders = [
-    'local_id',
-    'project_id',
-    'template_id',
-    'participant_id',
-    'status',
-    'gps_lat',
-    'gps_lng',
-    'gps_accuracy',
-    'created_at',
-    'synced_at',
-  ];
-  const fieldIds = Array.from(fieldColumns.keys());
-  const fieldNames = fieldIds.map((id) => fieldColumns.get(id) ?? id);
-  const allHeaders = [...fixedHeaders, ...fieldNames];
-
-  // Construir filas
-  const rows: string[] = [allHeaders.map(escapeCsvField).join(',')];
-
-  for (const { meta, values } of parsedRecords) {
-    const gps = meta.gps_json ? JSON.parse(meta.gps_json) : null;
-    const valueMap = new Map(values.map((v) => [v.field_id, v.field_value_json]));
-
-    const fixedValues = [
-      meta.local_id,
-      String(meta.project_id),
-      String(meta.template_id),
-      meta.participant_id != null ? String(meta.participant_id) : '',
-      meta.status,
-      gps?.lat != null ? String(gps.lat) : '',
-      gps?.lng != null ? String(gps.lng) : '',
-      gps?.accuracy != null ? String(gps.accuracy) : '',
-      meta.created_at,
-      meta.synced_at ?? '',
-    ];
-
-    const fieldValues = fieldIds.map((id) => {
-      const val = valueMap.get(id);
-      return formatCsvValue(val);
-    });
-
-    rows.push([...fixedValues, ...fieldValues].map(escapeCsvField).join(','));
-  }
-
-  // BOM para Excel compatibility + contenido
-  const bom = '﻿';
-  const csv = bom + rows.join('\n');
-
+async function exportAsCsv(rows: XlsxCell[][], templateName: string, timestamp: string): Promise<ExportResult> {
+  const lines = rows.map((row) => row.map((cell) => escapeCsvField(cell === null || cell === undefined ? '' : String(cell))).join(','));
+  // BOM para que Excel reconozca UTF-8 (tildes y ñ)
+  const csv = '﻿' + lines.join('\n');
   const fileName = `infomatt360_${templateName}_${timestamp}.csv`;
   const filePath = `${FileSystem.documentDirectory}${fileName}`;
-  await FileSystem.writeAsStringAsync(filePath, csv, {
-    encoding: FileSystem.EncodingType.UTF8,
-  });
-
-  return { filePath, fileName, recordCount: parsedRecords.length };
-}
-
-/** Formatea un valor de campo para CSV */
-function formatCsvValue(val: unknown): string {
-  if (val === null || val === undefined) return '';
-  if (typeof val === 'string') return val;
-  if (typeof val === 'number' || typeof val === 'boolean') return String(val);
-  if (typeof val === 'object') {
-    // GPS
-    if ('lat' in (val as any) && 'lng' in (val as any)) {
-      const gps = val as { lat: number; lng: number };
-      return `${gps.lat},${gps.lng}`;
-    }
-    // Signature/fingerprint: solo indicar tipo
-    if ('dataUri' in (val as any)) return '[firma/huella]';
-    // Archivos
-    if ('uri' in (val as any)) return '[archivo]';
-    return JSON.stringify(val);
-  }
-  return String(val);
+  await FileSystem.writeAsStringAsync(filePath, csv, { encoding: FileSystem.EncodingType.UTF8 });
+  return { filePath, fileName, recordCount: rows.length - 1 };
 }
 
 /** Escapa un campo para CSV (comillas dobles si contiene delimitadores) */
@@ -216,56 +198,45 @@ function escapeCsvField(value: string): string {
   return value;
 }
 
+// ── JSON ──────────────────────────────────────────────────────────────
+
+async function exportAsJson(records: ExportRecord[], templateName: string, timestamp: string): Promise<ExportResult> {
+  const exportData = records.map((rec) => {
+    const values: RecordValue[] = JSON.parse(rec.data_json);
+    const gps = rec.gps_json ? JSON.parse(rec.gps_json) : null;
+    return {
+      local_id: rec.local_id,
+      project_id: rec.project_id,
+      template_id: rec.template_id,
+      participant_id: rec.participant_id,
+      status: rec.status,
+      gps,
+      values: values.map((v) => ({ field_id: v.field_id, field_name: v.field_name, value: v.field_value_json })),
+      created_at: rec.created_at,
+      synced_at: rec.synced_at,
+    };
+  });
+  const json = JSON.stringify({ exported_at: new Date().toISOString(), record_count: exportData.length, records: exportData }, null, 2);
+  const fileName = `infomatt360_${templateName}_${timestamp}.json`;
+  const filePath = `${FileSystem.documentDirectory}${fileName}`;
+  await FileSystem.writeAsStringAsync(filePath, json, { encoding: FileSystem.EncodingType.UTF8 });
+  return { filePath, fileName, recordCount: exportData.length };
+}
+
+// ── Compartir ─────────────────────────────────────────────────────────
+
 /**
- * Comparte el archivo exportado usando la Share API nativa.
- *
- * En Android, Share.share no soporta archivos directamente sin
- * expo-sharing. Usamos un content:// URI via FileSystem para
- * que el intent de compartir funcione correctamente.
+ * Comparte el archivo con la hoja nativa (WhatsApp, correo, Drive...).
+ * Antes en Android se compartía el contenido como texto, no el archivo.
  */
 export async function shareExportFile(filePath: string): Promise<void> {
-  if (Platform.OS === 'ios') {
-    // En iOS, Share puede compartir archivos directamente
-    await Share.share({ url: filePath });
-  } else {
-    // En Android, leer el archivo como texto y compartir el contenido
-    // directamente, lo que permite copiarlo a cualquier app
-    try {
-      const content = await FileSystem.readAsStringAsync(filePath, {
-        encoding: FileSystem.EncodingType.UTF8,
-      });
-      const fileName = filePath.split('/').pop() ?? 'export';
-      const isJson = fileName.endsWith('.json');
-
-      // Para archivos pequenos (<100KB), compartir contenido inline
-      // Para archivos grandes, compartir la ruta con instrucciones
-      if (content.length < 100_000) {
-        await Share.share({
-          title: `InfoMatt360 - ${fileName}`,
-          message: isJson
-            ? content
-            : `${fileName}\n\n${content}`,
-        });
-      } else {
-        // Archivo grande: notificar ruta y tamano
-        const sizeKb = Math.round(content.length / 1024);
-        await Share.share({
-          title: `InfoMatt360 - ${fileName}`,
-          message:
-            `Archivo exportado: ${fileName} (${sizeKb} KB)\n\n` +
-            `Ubicacion: ${filePath}\n\n` +
-            `Puedes acceder al archivo desde un gestor de archivos ` +
-            `o conectar el dispositivo a un computador para copiarlo.`,
-        });
-      }
-    } catch {
-      // Fallback: compartir solo la ruta
-      await Share.share({
-        title: 'Exportar datos InfoMatt360',
-        message: `Archivo exportado: ${filePath}`,
-      });
-    }
+  const fileName = filePath.split('/').pop() ?? 'export';
+  const extension = (fileName.split('.').pop() ?? 'csv') as ExportFormat;
+  if (await Sharing.isAvailableAsync()) {
+    await Sharing.shareAsync(filePath, { mimeType: MIME[extension] ?? 'application/octet-stream', dialogTitle: `InfoMatt360 - ${fileName}` });
+    return;
   }
+  await Share.share({ title: 'Exportar datos InfoMatt360', message: `Archivo exportado: ${filePath}` });
 }
 
 /**
@@ -280,7 +251,7 @@ export async function listExportFiles(): Promise<{ name: string; uri: string; si
     const exports: { name: string; uri: string; size: number; modTime: number }[] = [];
 
     for (const file of files) {
-      if (file.startsWith('infomatt360_') && (file.endsWith('.csv') || file.endsWith('.json'))) {
+      if (file.startsWith('infomatt360_') && /\.(xlsx|csv|json)$/.test(file)) {
         const info = await FileSystem.getInfoAsync(dir + file);
         exports.push({
           name: file,

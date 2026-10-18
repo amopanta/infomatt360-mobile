@@ -174,7 +174,7 @@ export default function SyncStatusScreen() {
         style={styles.secondaryButton}
         onPress={() => navigation.navigate('Export')}
       >
-        <Text style={styles.secondaryButtonText}>Exportar datos (CSV / JSON)</Text>
+        <Text style={styles.secondaryButtonText}>Exportar datos (Excel, CSV, JSON)</Text>
       </TouchableOpacity>
     </ScrollView>
   );
