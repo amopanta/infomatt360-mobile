@@ -213,11 +213,15 @@ export function listPendingRecords(): {
   ) as any;
 }
 
-export function markRecordSynced(localId: string): void {
+/** serverRecordId: id asignado por el backend; se usa para vincular después
+ * las evidencias adjuntas (POST /files/upload con record_id). */
+export function markRecordSynced(localId: string, serverRecordId: string | null = null): void {
   const db = getDatabase();
   db.runSync(
-    `UPDATE queued_records SET status = 'synced', synced_at = datetime('now') WHERE local_id = ?`,
-    [localId],
+    `UPDATE queued_records SET status = 'synced', synced_at = datetime('now'),
+            server_record_id = COALESCE(?, server_record_id)
+     WHERE local_id = ?`,
+    [serverRecordId, localId],
   );
 }
 
@@ -823,22 +827,48 @@ export function getRecordEvidence(recordLocalId: string): {
   file_uri: string;
   remote_url: string | null;
   mime_type: string;
+  file_size: number;
   uploaded: number;
 }[] {
   const db = getDatabase();
   return db.getAllSync(
-    `SELECT local_id, type, file_uri, remote_url, mime_type, uploaded
+    `SELECT local_id, type, file_uri, remote_url, mime_type, file_size, uploaded
      FROM evidence WHERE record_local_id = ?`,
     [recordLocalId],
   ) as any;
 }
 
-export function markEvidenceUploaded(localId: string, remoteUrl: string): void {
+export function markEvidenceUploaded(localId: string, remoteUrl: string, fileSize?: number): void {
   const db = getDatabase();
   db.runSync(
-    `UPDATE evidence SET uploaded = 1, remote_url = ? WHERE local_id = ?`,
-    [remoteUrl, localId],
+    `UPDATE evidence SET uploaded = 1, remote_url = ?, file_size = COALESCE(?, file_size) WHERE local_id = ?`,
+    [remoteUrl, fileSize ?? null, localId],
   );
+}
+
+/** Reemplaza solo los valores capturados (sin tocar estado, GPS ni conflictos). */
+export function replaceRecordData(localId: string, data: unknown[]): void {
+  const db = getDatabase();
+  db.runSync(`UPDATE queued_records SET data_json = ? WHERE local_id = ?`, [JSON.stringify(data), localId]);
+}
+
+/** Evidencias adjuntas aún sin subir cuyo registro ya existe en el servidor. */
+export function listEvidenceAwaitingRecord(): {
+  local_id: string;
+  type: string;
+  file_uri: string;
+  mime_type: string;
+  project_id: string;
+  participant_id: string | null;
+  server_record_id: string;
+}[] {
+  const db = getDatabase();
+  return db.getAllSync(
+    `SELECT e.local_id, e.type, e.file_uri, e.mime_type,
+            q.project_id, q.participant_id, q.server_record_id
+     FROM evidence e JOIN queued_records q ON q.local_id = e.record_local_id
+     WHERE e.uploaded = 0 AND q.status = 'synced' AND q.server_record_id IS NOT NULL`,
+  ) as any;
 }
 
 export function getPendingEvidenceCount(): number {

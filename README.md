@@ -151,10 +151,13 @@ Esta es la **app móvil oficial** de InfoMatt360. El antiguo módulo `mobile/` d
 
 | Función | Endpoint del backend principal |
 |---|---|
-| Login / MFA | `POST /auth/login` (reto `mfa_challenge_token`) → `POST /auth/mfa/verify` `{challenge_token, code}` |
+| Login / MFA | `POST /auth/login` (reto `mfa_challenge_token`) → `POST /auth/mfa/verify` `{challenge_token, code}`. Toda petición lleva `X-Client-Platform: native`: así el backend entrega el refresh token en el cuerpo (se guarda en SecureStore) |
+| Renovar sesión | `POST /auth/refresh` `{refresh_token}` → nuevo par rotado |
 | Formularios | `GET /builder/templates/{project_id}` (solo `published`) + `GET /runtime/template/{id}` |
 | Participantes | `GET /participants/project/{project_id}`, `GET /participants/{id}`, `GET /participants/{id}/activities` |
 | Sincronización | `POST /runtime/session/bulk-save` — cada registro lleva `project_id`, `template_id` y `values: [{field_name, field_value_json}]` (JSON en texto) |
-| Evidencias | `POST /files/upload` (multipart: `upload`, `project_id`, `asset_type`) |
+| Evidencias | `POST /files/upload` (multipart: `upload`, `project_id`, `asset_type`, `record_id` opcional). Orden: fotos de campo y firmas → registro → adjuntos con el `record_id` del servidor. Los campos de archivo se envían como `{file_asset_id, name, mime_type, size_bytes}` |
 
 Los identificadores son UUID (texto). Al actualizar, la app recrea una vez las tablas de caché local (`form_templates`, `participants`) sin tocar la cola de capturas pendientes. Detalle en `docs/140_REESTRUCTURACION_UX_Y_CLIENTE_MOVIL_UNICO.md` del repositorio principal.
+
+Pruebas en emulador Android y errores corregidos: sección 5 de `docs/140` del repositorio principal.

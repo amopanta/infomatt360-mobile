@@ -19,7 +19,8 @@ import { useRoute, useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import * as Location from 'expo-location';
 import * as ImagePicker from 'expo-image-picker';
-import { v4 as uuidv4 } from 'uuid';
+// uuid v14 necesita crypto.getRandomValues, que no existe en React Native.
+import { randomUUID as uuidv4 } from 'expo-crypto';
 import FieldRenderer from '../components/FieldRenderer';
 import RepeatGroupRenderer, { getRepeatFieldId, parseRepeatFieldId } from '../components/RepeatGroupRenderer';
 import PageProgressBar from '../components/PageProgressBar';

@@ -11,6 +11,7 @@
 
 import * as Crypto from 'expo-crypto';
 import * as Network from 'expo-network';
+import * as FileSystem from 'expo-file-system/legacy';
 import { ENV } from '../config/env';
 import { bulkSaveRecords, uploadEvidence } from '../api/syncApi';
 import {
@@ -19,6 +20,9 @@ import {
   markRecordError,
   markRecordConflict,
   getRecordEvidence,
+  getCachedForm,
+  replaceRecordData,
+  listEvidenceAwaitingRecord,
   markEvidenceUploaded,
   purgeOldSynced,
   getPendingCount,
@@ -119,14 +123,15 @@ export async function syncNow(): Promise<boolean> {
   let hadFailures = false;
 
   try {
-    // 1. Subir evidencias pendientes
-    await uploadPendingEvidence();
+    // 1. Subir las fotos/archivos que van dentro de un campo del formulario
+    await uploadFieldEvidence();
+    await uploadSignatures();
 
     // 2. Obtener registros pendientes y agrupar por (project, template).
-    // Un registro con evidencias aún sin subir espera al siguiente ciclo, para
-    // no enviar al servidor rutas de archivos que solo existen en el teléfono.
+    // Un registro con fotos de campo aún sin subir espera al siguiente ciclo,
+    // para no enviar al servidor rutas que solo existen en el teléfono.
     const records = listPendingRecords().filter((r) =>
-      getRecordEvidence(r.local_id).every((ev) => ev.uploaded),
+      fieldEvidence(r).every((ev) => ev.uploaded) && !hasInlineSignature(r.data_json),
     );
     const groups = new Map<string, typeof records>();
 
@@ -156,7 +161,7 @@ export async function syncNow(): Promise<boolean> {
             template_id,
             participant_id: r.participant_id ?? null,
             status: 'submitted',
-            values: toBackendValues(JSON.parse(r.data_json) as RecordValue[], evidenceIdsFor(r.local_id)),
+            values: toBackendValues(JSON.parse(r.data_json) as RecordValue[], evidenceIdsFor(r.local_id), fieldTypesFor(template_id)),
           })),
         };
 
@@ -168,7 +173,7 @@ export async function syncNow(): Promise<boolean> {
         groupRecords.forEach((rec, index) => {
           const item = byIndex.get(index);
           if (item?.status === 'created' || item?.status === 'queued') {
-            markRecordSynced(rec.local_id);
+            markRecordSynced(rec.local_id, item.id ?? null);
           } else if (item?.status === 'conflict') {
             // Conflicto detectado por el servidor: guardar ambas versiones
             markRecordConflict(
@@ -206,7 +211,10 @@ export async function syncNow(): Promise<boolean> {
       }
     }
 
-    // 4. Limpieza automatica de sincronizados antiguos (doc 107)
+    // 4. Evidencias adjuntas: se suben ya vinculadas al registro del servidor
+    await uploadAttachedEvidence();
+
+    // 5. Limpieza automatica de sincronizados antiguos (doc 107)
     purgeOldSynced(ENV.SYNCED_RETENTION_DAYS);
   } finally {
     isSyncing = false;
@@ -216,31 +224,94 @@ export async function syncNow(): Promise<boolean> {
   return hadFailures;
 }
 
+/** Mismo formato que guarda la web para campos IMAGE/FILE/FINGERPRINT
+ * (frontend/src/modules/runtime/api.ts: uploadRuntimeFile). */
+type FileValue = { file_asset_id: string; name: string; mime_type: string; size_bytes: number };
+
+/** Ruta local de un valor de campo: texto con la uri, o {uri}/{fileUri}. */
+function localUriOf(value: unknown): string | null {
+  if (typeof value === 'string') return value.startsWith('file:') || value.startsWith('content:') ? value : null;
+  if (value && typeof value === 'object') {
+    const v = value as { uri?: unknown; fileUri?: unknown };
+    if (typeof v.uri === 'string') return v.uri;
+    if (typeof v.fileUri === 'string') return v.fileUri;
+  }
+  return null;
+}
+
 /** Valores locales → contrato del backend (field_value_json como texto JSON).
- * Si un valor apunta a un archivo local ya subido, se envía el id del archivo
- * en el servidor, que es lo que guarda la web para campos IMAGE/FILE/SIGNATURE. */
-function toBackendValues(values: RecordValue[], uploaded: Map<string, string>): { field_name: string; field_value_json: string }[] {
+ * Un campo que apunta a un archivo local ya subido se envía como referencia
+ * al archivo del servidor, igual que la web. */
+function toBackendValues(
+  values: RecordValue[],
+  uploaded: Map<string, FileValue>,
+  types: Map<string, string>,
+): { field_name: string; field_value_json: string }[] {
   const seen = new Set<string>();
   const out: { field_name: string; field_value_json: string }[] = [];
   for (const v of values) {
     const name = v.field_name || v.field_id;
     if (!name || seen.has(name)) continue;
     seen.add(name);
-    const raw = typeof v.field_value_json === 'string' && uploaded.has(v.field_value_json)
-      ? uploaded.get(v.field_value_json)
-      : v.field_value_json;
+    const uri = localUriOf(v.field_value_json);
+    let raw = uri && uploaded.has(uri) ? uploaded.get(uri) : v.field_value_json;
+    // Sí/No se captura como texto 'true'/'false'; la web lo guarda como booleano.
+    if (types.get(name) === 'BOOLEAN' && (raw === 'true' || raw === 'false')) raw = raw === 'true';
     out.push({ field_name: name, field_value_json: JSON.stringify(raw ?? null) });
   }
   return out;
 }
 
-/** uri local → id del archivo en el servidor, para las evidencias ya subidas */
-function evidenceIdsFor(recordLocalId: string): Map<string, string> {
-  const map = new Map<string, string>();
+/** uri local → archivo en el servidor, para las evidencias ya subidas */
+function evidenceIdsFor(recordLocalId: string): Map<string, FileValue> {
+  const map = new Map<string, FileValue>();
   for (const ev of getRecordEvidence(recordLocalId)) {
-    if (ev.uploaded && ev.remote_url) map.set(ev.file_uri, ev.remote_url);
+    if (!ev.uploaded || !ev.remote_url) continue;
+    map.set(ev.file_uri, {
+      file_asset_id: ev.remote_url,
+      name: ev.file_uri.split('/').pop() ?? ev.local_id,
+      mime_type: ev.mime_type,
+      size_bytes: ev.file_size ?? 0,
+    });
   }
   return map;
+}
+
+/** field_name → tipo del backend, según la plantilla guardada en el teléfono. */
+function fieldTypesFor(templateId: string): Map<string, string> {
+  const types = new Map<string, string>();
+  const cached = getCachedForm(templateId);
+  if (!cached) return types;
+  try {
+    for (const page of JSON.parse(cached.schema_json) as any[]) {
+      for (const section of page.sections ?? []) {
+        for (const row of section.rows ?? []) {
+          for (const column of row.columns ?? []) {
+            for (const component of column.components ?? []) {
+              if (component.config?.backendType) types.set(component.id, component.config.backendType);
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // Plantilla antigua sin backendType: se envían los valores tal cual
+  }
+  return types;
+}
+
+/** La firma se captura como imagen en base64 dentro del valor. */
+function isInlineSignature(value: unknown): value is { dataUri: string } {
+  return Boolean(value && typeof value === 'object' && typeof (value as any).dataUri === 'string' && (value as any).dataUri.startsWith('data:image'));
+}
+
+function hasInlineSignature(dataJson: string): boolean {
+  return dataJson.includes('"dataUri":"data:image');
+}
+
+/** Evidencias usadas como valor de algún campo del registro (foto, huella...). */
+function fieldEvidence(rec: { local_id: string; data_json: string }) {
+  return getRecordEvidence(rec.local_id).filter((ev) => rec.data_json.includes(ev.file_uri));
 }
 
 /** Tipo de evidencia local → asset_type aceptado por POST /files/upload */
@@ -256,12 +327,12 @@ function assetTypeFor(type: string, mime: string): string {
 
 // ── Subida de evidencias ─────────────────────────────────────────────
 
-async function uploadPendingEvidence(): Promise<void> {
+/** Fotos/archivos de campo: se suben antes del registro, sin record_id. */
+async function uploadFieldEvidence(): Promise<void> {
   const records = listPendingRecords();
 
   for (const rec of records) {
-    const evidences = getRecordEvidence(rec.local_id);
-    for (const ev of evidences) {
+    for (const ev of fieldEvidence(rec)) {
       if (ev.uploaded) continue;
       try {
         const result = await uploadEvidence(
@@ -272,10 +343,58 @@ async function uploadPendingEvidence(): Promise<void> {
           assetTypeFor(ev.type, ev.mime_type),
           rec.participant_id,
         );
-        markEvidenceUploaded(ev.local_id, result.id);
+        markEvidenceUploaded(ev.local_id, result.id, result.size_bytes);
       } catch {
         // Se reintentara en el proximo ciclo
       }
+    }
+  }
+}
+
+/** Firmas: se guardan como PNG y se suben como archivo SIGNATURE, igual que
+ * la web (RuntimeSignature.tsx), en vez de viajar en base64 dentro del registro. */
+async function uploadSignatures(): Promise<void> {
+  for (const rec of listPendingRecords()) {
+    if (!hasInlineSignature(rec.data_json)) continue;
+    const values = JSON.parse(rec.data_json) as RecordValue[];
+    let changed = false;
+    for (const v of values) {
+      if (!isInlineSignature(v.field_value_json)) continue;
+      const fileUri = `${FileSystem.cacheDirectory}firma_${rec.local_id}_${v.field_id}.png`;
+      try {
+        await FileSystem.writeAsStringAsync(fileUri, v.field_value_json.dataUri.split(',')[1] ?? '', {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        const result = await uploadEvidence(rec.project_id, fileUri, 'image/png', `firma_${v.field_id}.png`, 'SIGNATURE', rec.participant_id);
+        v.field_value_json = { file_asset_id: result.id, name: result.original_name, mime_type: 'image/png', size_bytes: result.size_bytes };
+        changed = true;
+      } catch {
+        // Sin red o error del servidor: el registro espera al siguiente ciclo
+      } finally {
+        await FileSystem.deleteAsync(fileUri, { idempotent: true }).catch(() => {});
+      }
+    }
+    if (changed) replaceRecordData(rec.local_id, values);
+  }
+}
+
+/** Evidencias adjuntas (pantalla Evidencias): se suben con record_id para que
+ * queden vinculadas al registro en el servidor. */
+async function uploadAttachedEvidence(): Promise<void> {
+  for (const ev of listEvidenceAwaitingRecord()) {
+    try {
+      const result = await uploadEvidence(
+        ev.project_id,
+        ev.file_uri,
+        ev.mime_type,
+        `${ev.local_id}.${ev.mime_type.split('/')[1] ?? 'bin'}`,
+        assetTypeFor(ev.type, ev.mime_type),
+        ev.participant_id,
+        ev.server_record_id,
+      );
+      markEvidenceUploaded(ev.local_id, result.id, result.size_bytes);
+    } catch {
+      // Se reintentara en el proximo ciclo
     }
   }
 }

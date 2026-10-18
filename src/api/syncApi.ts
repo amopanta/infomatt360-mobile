@@ -27,7 +27,8 @@ export async function uploadEvidence(
   fileName: string,
   assetType: string,
   participantId?: string | null,
-): Promise<{ id: string; storage_path: string }> {
+  recordId?: string | null,
+): Promise<{ id: string; storage_path: string; size_bytes: number; original_name: string }> {
   // Campos exigidos por backend/app/api/v1/files.py (upload_file_asset)
   const formData = new FormData();
   formData.append('upload', {
@@ -38,6 +39,7 @@ export async function uploadEvidence(
   formData.append('project_id', projectId);
   formData.append('asset_type', assetType);
   if (participantId) formData.append('participant_id', participantId);
+  if (recordId) formData.append('record_id', recordId);
 
   const { data } = await api.post('/files/upload', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },

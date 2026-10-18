@@ -72,7 +72,7 @@ export default function FormListScreen() {
       }
       loadCached();
     } catch (err: any) {
-      if (forms.length === 0) {
+      if (getCachedForms(activeProjectId).length === 0) {
         Alert.alert(
           'Sin conexion',
           'No hay formularios descargados. Conectese a internet para descargar.',
@@ -81,7 +81,7 @@ export default function FormListScreen() {
     } finally {
       setRefreshing(false);
     }
-  }, [activeProjectId, loadCached, forms.length]);
+  }, [activeProjectId, loadCached]);
 
   useEffect(() => {
     loadCached();

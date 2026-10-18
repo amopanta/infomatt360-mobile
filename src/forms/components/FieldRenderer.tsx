@@ -19,9 +19,7 @@ import {
   Image,
   Platform,
 } from 'react-native';
-import DateTimePicker, {
-  type DateTimePickerEvent,
-} from '@react-native-community/datetimepicker';
+import DateTimePicker, { type DateTimePickerChangeEvent } from '@react-native-community/datetimepicker';
 import type { FormComponent } from '../../types';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
@@ -193,19 +191,19 @@ export default function FieldRenderer({
       );
 
     case 'date': {
-      const dateValue = value ? new Date(value as string) : undefined;
+      // 'YYYY-MM-DD' se interpreta como fecha local: new Date('2026-10-16')
+      // es medianoche UTC y en Colombia (UTC-5) se mostraría 15/10.
+      const dateValue = parseLocalDate(value);
       const displayDate = dateValue && !isNaN(dateValue.getTime())
         ? dateValue.toLocaleDateString('es-CO', { year: 'numeric', month: '2-digit', day: '2-digit' })
         : '';
 
-      const handleDateChange = (_event: DateTimePickerEvent, selectedDate?: Date) => {
+      const handleDateChange = (_event: DateTimePickerChangeEvent, selectedDate: Date) => {
         if (Platform.OS === 'android') {
           setShowDatePicker(false);
         }
-        if (selectedDate) {
-          const iso = selectedDate.toISOString().split('T')[0];
-          onChange(id, iso);
-        }
+        // toISOString() pasa a UTC y de noche correría la fecha al día siguiente.
+        onChange(id, toLocalIsoDate(selectedDate));
       };
 
       return (
@@ -225,7 +223,8 @@ export default function FieldRenderer({
                 value={dateValue && !isNaN(dateValue.getTime()) ? dateValue : new Date()}
                 mode="date"
                 display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-                onChange={handleDateChange}
+                onValueChange={handleDateChange}
+                onDismiss={() => setShowDatePicker(false)}
                 locale="es"
               />
               {Platform.OS === 'ios' && (
@@ -698,3 +697,17 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
   },
 });
+
+/** 'YYYY-MM-DD' → Date local (sin desfase de zona horaria). */
+function parseLocalDate(value: unknown): Date | undefined {
+  if (typeof value !== 'string' || !value) return undefined;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  const date = match ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])) : new Date(value);
+  return isNaN(date.getTime()) ? undefined : date;
+}
+
+/** Date → 'YYYY-MM-DD' con el día del calendario local. */
+function toLocalIsoDate(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
