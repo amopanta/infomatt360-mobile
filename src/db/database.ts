@@ -180,6 +180,31 @@ function initializeDatabase(database: SQLite.SQLiteDatabase): void {
   database.execSync(`
     CREATE INDEX IF NOT EXISTS idx_route_points_sent ON route_points(sent, recorded_at);
   `);
+
+  // Paquete sin conexión (H02): asignaciones del gestor y fecha de la última
+  // descarga por proyecto, para trabajar y validar sin red.
+  try {
+    database.execSync(`ALTER TABLE form_templates ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'legacy';`);
+  } catch { /* columna ya existe */ }
+  database.execSync(`
+    CREATE TABLE IF NOT EXISTS form_assignments_cache (
+      project_id TEXT NOT NULL,
+      template_id TEXT NOT NULL,
+      participant_id TEXT NOT NULL,
+      access_mode TEXT NOT NULL,
+      assignment_status TEXT NOT NULL,
+      record_id TEXT,
+      PRIMARY KEY (project_id, template_id, participant_id)
+    );
+  `);
+  database.execSync(`
+    CREATE TABLE IF NOT EXISTS offline_packages (
+      project_id TEXT PRIMARY KEY,
+      downloaded_at TEXT NOT NULL,
+      participant_count INTEGER NOT NULL DEFAULT 0,
+      assignment_count INTEGER NOT NULL DEFAULT 0
+    );
+  `);
 }
 
 // ── Operaciones de la cola offline ───────────────────────────────────
@@ -942,12 +967,13 @@ export function cacheFormTemplate(template: {
   name: string;
   description?: string;
   schemaJson: string;
+  accessMode?: string;
 }): void {
   const db = getDatabase();
   db.runSync(
     `INSERT OR REPLACE INTO form_templates
-       (id, project_id, template_id, version, name, description, schema_json, downloaded_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+       (id, project_id, template_id, version, name, description, schema_json, access_mode, downloaded_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
     [
       template.id,
       template.projectId,
@@ -956,8 +982,14 @@ export function cacheFormTemplate(template: {
       template.name,
       template.description ?? null,
       template.schemaJson,
+      template.accessMode ?? 'legacy',
     ],
   );
+}
+
+export function getFormAccessMode(formId: string): string {
+  const row = getDatabase().getFirstSync<{ access_mode: string }>(`SELECT access_mode FROM form_templates WHERE id = ?`, [formId]);
+  return row?.access_mode ?? 'legacy';
 }
 
 export function getCachedForms(projectId: string): {
@@ -1265,4 +1297,83 @@ export function purgeSentRoutePoints(retentionDays = 7): void {
     `DELETE FROM route_points WHERE sent = 1 AND recorded_at < ?`,
     [new Date(Date.now() - retentionDays * 86_400_000).toISOString()],
   );
+}
+
+// ── Paquete sin conexión: participantes y asignaciones (H02) ─────────
+
+export interface CachedAssignment {
+  template_id: string;
+  participant_id: string;
+  access_mode: string;
+  assignment_status: string;
+  record_id: string | null;
+}
+
+/**
+ * Reemplaza en una sola transacción los participantes y asignaciones del
+ * proyecto por lo que el servidor autoriza hoy: quien ya no está asignado o
+ * cambió de territorio desaparece del teléfono. Los registros capturados no
+ * se tocan.
+ */
+export function replaceProjectSnapshot(
+  projectId: string,
+  participants: Parameters<typeof cacheParticipant>[0][],
+  assignments: CachedAssignment[],
+): void {
+  const db = getDatabase();
+  db.execSync('BEGIN');
+  try {
+    db.runSync(`DELETE FROM participants WHERE project_id = ?`, [projectId]);
+    for (const p of participants) cacheParticipant(p);
+    db.runSync(`DELETE FROM form_assignments_cache WHERE project_id = ?`, [projectId]);
+    for (const a of assignments) {
+      db.runSync(
+        `INSERT OR REPLACE INTO form_assignments_cache
+           (project_id, template_id, participant_id, access_mode, assignment_status, record_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [projectId, a.template_id, a.participant_id, a.access_mode, a.assignment_status, a.record_id],
+      );
+    }
+    db.runSync(
+      `INSERT OR REPLACE INTO offline_packages (project_id, downloaded_at, participant_count, assignment_count) VALUES (?, ?, ?, ?)`,
+      [projectId, new Date().toISOString(), participants.length, assignments.length],
+    );
+    db.execSync('COMMIT');
+  } catch (error) {
+    db.execSync('ROLLBACK');
+    throw error;
+  }
+}
+
+export function getOfflinePackage(projectId: string): { downloaded_at: string; participant_count: number; assignment_count: number } | null {
+  return getDatabase().getFirstSync(
+    `SELECT downloaded_at, participant_count, assignment_count FROM offline_packages WHERE project_id = ?`,
+    [projectId],
+  ) as any;
+}
+
+export function getCachedAssignment(projectId: string, templateId: string, participantId: string): CachedAssignment | null {
+  return getDatabase().getFirstSync(
+    `SELECT template_id, participant_id, access_mode, assignment_status, record_id
+     FROM form_assignments_cache WHERE project_id = ? AND template_id = ? AND participant_id = ?`,
+    [projectId, templateId, participantId],
+  ) as any;
+}
+
+export function getParticipantAssignments(projectId: string, participantId: string): CachedAssignment[] {
+  return getDatabase().getAllSync(
+    `SELECT template_id, participant_id, access_mode, assignment_status, record_id
+     FROM form_assignments_cache WHERE project_id = ? AND participant_id = ?`,
+    [projectId, participantId],
+  ) as any;
+}
+
+/** Estado del registro ya capturado en este teléfono para la actividad (sin borradores). */
+export function getLocalRecordStatus(templateId: string, participantId: string): string | null {
+  const row = getDatabase().getFirstSync<{ status: string }>(
+    `SELECT status FROM queued_records WHERE template_id = ? AND participant_id = ? AND status != 'draft'
+     ORDER BY created_at DESC LIMIT 1`,
+    [templateId, participantId],
+  );
+  return row?.status ?? null;
 }

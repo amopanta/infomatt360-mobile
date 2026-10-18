@@ -109,6 +109,8 @@ export interface FormTemplate {
   project_id: string;
   pages: FormPage[];
   published: boolean;
+  /** legacy | open | closed: reglas de asignación (ver assignmentRules) */
+  accessMode?: string;
   created_at: string;
   updated_at: string;
 }

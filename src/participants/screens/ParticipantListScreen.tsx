@@ -24,12 +24,13 @@ import {
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { getProjectParticipants } from '../../api/participantsApi';
 import {
   getCachedParticipants,
-  cacheParticipant,
+  getOfflinePackage,
   getParticipantCount,
 } from '../../db/database';
+import { downloadProjectPackage } from '../offlinePackage';
+import { PACKAGE_STALE_DAYS, packageAgeDays } from '../assignmentRules';
 import { useAuthStore } from '../../store/authStore';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
@@ -49,38 +50,27 @@ export default function ParticipantListScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [totalCount, setTotalCount] = useState(0);
+  const [packageInfo, setPackageInfo] = useState<ReturnType<typeof getOfflinePackage>>(null);
 
   const loadCached = useCallback(() => {
     if (!activeProjectId) return;
     const cached = getCachedParticipants(activeProjectId, searchQuery || undefined);
     setParticipants(cached);
     setTotalCount(getParticipantCount(activeProjectId));
+    setPackageInfo(getOfflinePackage(activeProjectId));
   }, [activeProjectId, searchQuery]);
 
   const downloadParticipants = useCallback(async () => {
     if (!activeProjectId) return;
     setRefreshing(true);
     try {
-      const remote = await getProjectParticipants(activeProjectId, { limit: 1000 });
-      for (const p of remote.items) {
-        cacheParticipant({
-          id: p.id,
-          projectId: activeProjectId,
-          fullName: p.full_name,
-          documentType: p.document_type,
-          documentNumber: p.document_number,
-          code: p.code,
-          phone: p.phone,
-          email: p.email,
-          address: p.address,
-          extraJson: p.extra_json,
-          createdAt: p.created_at,
-          updatedAt: p.updated_at,
-        });
-      }
+      // Participantes autorizados y asignaciones, reemplazados en bloque.
+      await downloadProjectPackage(activeProjectId);
       loadCached();
     } catch {
-      if (participants.length === 0) {
+      // Se consulta la base (no el estado de pantalla, que al abrir aún está
+      // vacío): con participantes ya descargados no hay nada que avisar.
+      if (activeProjectId && getParticipantCount(activeProjectId) === 0) {
         Alert.alert(
           'Sin conexion',
           'No hay participantes descargados. Conectese a internet para descargar.',
@@ -89,7 +79,7 @@ export default function ParticipantListScreen() {
     } finally {
       setRefreshing(false);
     }
-  }, [activeProjectId, loadCached, participants.length]);
+  }, [activeProjectId, loadCached]);
 
   useEffect(() => {
     loadCached();
@@ -154,6 +144,7 @@ export default function ParticipantListScreen() {
         <Text style={styles.searchCount}>
           {participants.length} de {totalCount} participante{totalCount !== 1 ? 's' : ''}
         </Text>
+        <PackageBanner downloadedAt={packageInfo?.downloaded_at ?? null} assignments={packageInfo?.assignment_count ?? 0} />
       </View>
 
       <FlatList
@@ -190,7 +181,25 @@ export default function ParticipantListScreen() {
   );
 }
 
+/** Disponible sin conexión: fecha de la última descarga y aviso si es vieja. */
+function PackageBanner({ downloadedAt, assignments }: { downloadedAt: string | null; assignments: number }) {
+  const days = packageAgeDays(downloadedAt);
+  if (days === null) {
+    return <Text style={[styles.packageBanner, styles.packageStale]}>Sin descargar: conéctese y deslice hacia abajo para trabajar sin red.</Text>;
+  }
+  const when = days === 0 ? 'hoy' : days === 1 ? 'ayer' : `hace ${days} días`;
+  const stale = days > PACKAGE_STALE_DAYS;
+  return (
+    <Text style={[styles.packageBanner, stale && styles.packageStale]}>
+      {stale ? '⚠️ ' : '✓ '}Disponible sin conexión · actualizado {when} · {assignments} {assignments === 1 ? 'asignación' : 'asignaciones'}
+      {stale ? '. Conéctese para actualizar.' : ''}
+    </Text>
+  );
+}
+
 const styles = StyleSheet.create({
+  packageBanner: { marginTop: spacing.xs, fontSize: fontSize.caption, color: colors.success },
+  packageStale: { color: colors.warning, fontWeight: '600' },
   container: {
     flex: 1,
     backgroundColor: colors.background,

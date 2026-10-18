@@ -35,7 +35,12 @@ import {
   saveAutoDraft,
   promoteDraftToPending,
   deleteAutoDraft,
+  getCachedAssignment,
+  getFormAccessMode,
+  getLocalRecordStatus,
+  getOfflinePackage,
 } from '../../db/database';
+import { checkCapture } from '../../participants/assignmentRules';
 import { useAuthStore } from '../../store/authStore';
 import { requestSync } from '../../sync/syncService';
 import type { FormPage, FormSection, FormComponent, GpsCoordinate, RecordValue } from '../../types';
@@ -93,6 +98,23 @@ export default function FormCaptureScreen() {
       navigation.goBack();
     }
   }, [formId, navigation]);
+
+  // Mismas reglas de asignación que el servidor, también sin red (H02): no
+  // dejar diligenciar algo que luego sería rechazado al sincronizar.
+  useEffect(() => {
+    if (!participantId || !activeProjectId) return;
+    const check = checkCapture({
+      accessMode: getFormAccessMode(formId),
+      assignment: getCachedAssignment(activeProjectId, formId, participantId),
+      localRecordStatus: getLocalRecordStatus(formId, participantId),
+      hasPackage: !!getOfflinePackage(activeProjectId),
+    });
+    if (!check.allowed) {
+      Alert.alert('No se puede aplicar', check.reason ?? 'La actividad no está disponible.', [
+        { text: 'Volver', onPress: () => navigation.goBack() },
+      ]);
+    }
+  }, [formId, participantId, activeProjectId, navigation]);
 
   // Capturar GPS automaticamente
   useEffect(() => {

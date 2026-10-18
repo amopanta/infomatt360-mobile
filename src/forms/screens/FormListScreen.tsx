@@ -23,6 +23,7 @@ import {
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { getProjectForms } from '../../api/formsApi';
+import { downloadProjectPackage } from '../../participants/offlinePackage';
 import { getCachedForms, cacheFormTemplate, getRecordCountsByTemplate } from '../../db/database';
 import { useAuthStore } from '../../store/authStore';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
@@ -68,8 +69,11 @@ export default function FormListScreen() {
           name: form.name,
           description: form.description,
           schemaJson: JSON.stringify(form.pages),
+          accessMode: form.accessMode,
         });
       }
+      // Preparación con conexión: participantes y asignaciones para trabajar sin red.
+      await downloadProjectPackage(activeProjectId).catch(() => {});
       loadCached();
     } catch (err: any) {
       if (getCachedForms(activeProjectId).length === 0) {

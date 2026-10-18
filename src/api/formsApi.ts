@@ -31,6 +31,7 @@ type BackendRuntimeTemplate = {
   name: string;
   description?: string | null;
   status: string;
+  access_mode?: string;
   pages: {
     id: string;
     title: string;
@@ -186,6 +187,7 @@ export async function getFormDetail(formId: string, summary?: BackendTemplate): 
     project_id: summary?.project_id ?? '',
     pages: toPages(data),
     published: data.status === 'published',
+    accessMode: data.access_mode ?? 'legacy',
     created_at: summary?.created_at ?? '',
     updated_at: summary?.updated_at ?? '',
   };
