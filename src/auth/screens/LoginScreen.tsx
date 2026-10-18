@@ -21,6 +21,7 @@ import {
 } from 'react-native';
 import { login, verifyMfa, getSession } from '../../api/authApi';
 import { useAuthStore } from '../../store/authStore';
+import { unsentFromOtherUsers } from '../sessionOwner';
 import { useServerStore } from '../../store/serverStore';
 import { ENV } from '../../config/env';
 import { getDeviceFingerprint } from '../../utils/deviceFingerprint';
@@ -116,6 +117,11 @@ export default function LoginScreen() {
     setTokens(accessToken, refreshToken);
     const session = await getSession();
     setSession(session);
+    // Equipo compartido (H07): avisar sin mostrar datos de otras personas.
+    const others = unsentFromOtherUsers(session.user_id);
+    if (others > 0) {
+      Alert.alert('Equipo compartido', `Este equipo tiene ${others} registro(s) sin enviar de otra persona. Se enviarán cuando esa persona inicie sesión; usted no los ve ni los envía.`);
+    }
     startAutoSync();
     void refreshBranding(orgSlug.trim() || undefined);
   };

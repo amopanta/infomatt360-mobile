@@ -23,6 +23,8 @@ import * as Location from 'expo-location';
 import * as Network from 'expo-network';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useAuthStore } from '../../store/authStore';
+import { getUnsentCount } from '../../db/database';
+import { wipeLocalUserData } from '../localWipe';
 import { getDatabase, getPendingCount, getPendingEvidenceCount } from '../../db/database';
 import { stopAutoSync } from '../../sync/syncService';
 import { getDeviceFingerprint } from '../../utils/deviceFingerprint';
@@ -98,17 +100,31 @@ export default function ProfileScreen() {
   }, []);
 
   const handleLogout = () => {
-    Alert.alert('Cerrar sesion', '¿Esta seguro de cerrar sesion? Los registros pendientes se conservan localmente.', [
-      { text: 'Cancelar', style: 'cancel' },
-      {
-        text: 'Cerrar sesion',
-        style: 'destructive',
-        onPress: () => {
-          stopAutoSync();
-          logout();
+    const unsent = getUnsentCount();
+    // Equipo compartido (H07): sin nada pendiente se pueden borrar los datos
+    // propios para que no queden en el equipo. Con pendientes no se ofrece.
+    Alert.alert(
+      'Cerrar sesion',
+      unsent > 0
+        ? `Tiene ${unsent} registro(s) sin enviar. Se conservan en este equipo y se enviarán cuando vuelva a entrar.`
+        : 'Todo está enviado. Si otra persona usará este equipo, puede borrar sus datos al salir.',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        ...(unsent === 0 ? [{
+          text: 'Salir y borrar mis datos',
+          style: 'destructive' as const,
+          onPress: () => { void wipeLocalUserData(); },
+        }] : []),
+        {
+          text: 'Cerrar sesion',
+          style: 'destructive',
+          onPress: () => {
+            stopAutoSync();
+            logout();
+          },
         },
-      },
-    ]);
+      ],
+    );
   };
 
   const handleChangeProject = () => {

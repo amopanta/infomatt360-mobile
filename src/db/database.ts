@@ -13,12 +13,78 @@ import * as SQLite from 'expo-sqlite';
 
 let db: SQLite.SQLiteDatabase | null = null;
 
+// ── Una base por usuario (H07) ───────────────────────────────────────
+// Antes había una sola base para todo el equipo: en una tableta compartida
+// el segundo usuario veía los borradores del primero y la sincronización
+// enviaba los pendientes del primero con la sesión del segundo. Ahora cada
+// usuario tiene su archivo; sin sesión se usa una base del equipo (ajustes y
+// errores de la app). La base anterior (infomatt360.db) queda para el primer
+// usuario que entra después de la actualización (ver sessionOwner.ts).
+const LEGACY_DB = 'infomatt360.db';
+const DEVICE_DB = 'infomatt360_device.db';
+let owner: { userId: string; useLegacyFile: boolean } | null = null;
+
+export function databaseFileFor(userId: string, useLegacyFile: boolean): string {
+  return useLegacyFile ? LEGACY_DB : `infomatt360_u_${userId.replace(/[^A-Za-z0-9-]/g, '')}.db`;
+}
+
+/** Cambia la base activa al usuario indicado (null = sin sesión). */
+export function setDatabaseOwner(next: { userId: string; useLegacyFile: boolean } | null): void {
+  if (owner?.userId === next?.userId && owner?.useLegacyFile === next?.useLegacyFile) return;
+  try { db?.closeSync(); } catch { /* ya cerrada */ }
+  db = null;
+  owner = next;
+}
+
+export function getDatabaseOwner(): string | null {
+  return owner?.userId ?? null;
+}
+
 export function getDatabase(): SQLite.SQLiteDatabase {
   if (!db) {
-    db = SQLite.openDatabaseSync('infomatt360.db');
+    db = SQLite.openDatabaseSync(owner ? databaseFileFor(owner.userId, owner.useLegacyFile) : DEVICE_DB);
     initializeDatabase(db);
   }
   return db;
+}
+
+let deviceDb: SQLite.SQLiteDatabase | null = null;
+
+/** Base del equipo (ajustes de la app): la misma para todos los usuarios. */
+export function getDeviceDatabase(): SQLite.SQLiteDatabase {
+  if (!deviceDb) deviceDb = SQLite.openDatabaseSync(DEVICE_DB);
+  return deviceDb;
+}
+
+/** Registros sin enviar (pendientes, con error, en conflicto o borradores) en la base de otro usuario. */
+export function unsentCountForUser(userId: string, useLegacyFile: boolean): number {
+  if (owner?.userId === userId) return 0;
+  let other: SQLite.SQLiteDatabase | null = null;
+  try {
+    other = SQLite.openDatabaseSync(databaseFileFor(userId, useLegacyFile));
+    const row = other.getFirstSync<{ n: number }>(
+      `SELECT COUNT(*) as n FROM queued_records WHERE status IN ('pending', 'error', 'conflict', 'draft')`,
+    );
+    return row?.n ?? 0;
+  } catch {
+    return 0; // base sin tablas: nunca capturó
+  } finally {
+    try { other?.closeSync(); } catch { /* nada */ }
+  }
+}
+
+/** Borra la base del usuario activo (borrado remoto o al cerrar sesión en equipo compartido). */
+export function deleteActiveUserDatabase(): string[] {
+  if (!owner) return [];
+  const database = getDatabase();
+  const files = [
+    ...database.getAllSync<{ file_uri: string }>(`SELECT file_uri FROM evidence`).map((r) => r.file_uri),
+  ];
+  const name = databaseFileFor(owner.userId, owner.useLegacyFile);
+  try { database.closeSync(); } catch { /* ya cerrada */ }
+  db = null;
+  SQLite.deleteDatabaseSync(name);
+  return files;
 }
 
 function initializeDatabase(database: SQLite.SQLiteDatabase): void {
@@ -1473,4 +1539,11 @@ export function getRecordTemplateVersion(localId: string): string | null {
     `SELECT template_version FROM queued_records WHERE local_id = ?`,
     [localId],
   )?.template_version ?? null;
+}
+
+/** Registros del usuario activo que aún no están en el servidor. */
+export function getUnsentCount(): number {
+  return getDatabase().getFirstSync<{ n: number }>(
+    `SELECT COUNT(*) as n FROM queued_records WHERE status IN ('pending', 'error', 'conflict', 'draft')`,
+  )?.n ?? 0;
 }

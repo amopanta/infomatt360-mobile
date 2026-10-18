@@ -31,6 +31,13 @@ import { getLastSuccessfulSyncAt, onSyncStatusChange } from '../sync/syncService
 
 const NOTICE_KEY = 'route_notice_ack';
 
+// Quién atiende un borrado remoto pedido por el servidor (auth/localWipe,
+// registrado en AppNavigator; así este módulo no depende de él).
+let wipeHandler: (() => Promise<void>) | null = null;
+export function setWipeHandler(handler: (() => Promise<void>) | null): void {
+  wipeHandler = handler;
+}
+
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let watcher: Location.LocationSubscription | null = null;
 let appStateSub: { remove: () => void } | null = null;
@@ -75,7 +82,7 @@ export async function sendHeartbeat(): Promise<boolean> {
     const points = listUnsentRoutePoints(1000);
     // Los puntos de otro proyecto se envían en su propio latido más adelante.
     const projectPoints = points.filter((p) => (p.project_id ?? null) === (activeProjectId ?? null));
-    await api.post('/field-devices/heartbeat', {
+    const { data } = await api.post<{ wipe_requested?: boolean }>('/field-devices/heartbeat', {
       device_id: await getDeviceFingerprint(),
       project_id: activeProjectId,
       device_name: deviceName(),
@@ -99,6 +106,7 @@ export async function sendHeartbeat(): Promise<boolean> {
     markRoutePointsSent(projectPoints.map((p) => p.id));
     purgeSentRoutePoints(7);
     lastSentAt = Date.now();
+    if (data?.wipe_requested && wipeHandler) void wipeHandler();
     return true;
   } catch {
     // Servidor caído o sin permiso: se reintenta en el siguiente ciclo.

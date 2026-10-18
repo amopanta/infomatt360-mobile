@@ -39,7 +39,10 @@ import ConflictResolutionScreen from '../sync/ConflictResolutionScreen';
 import ExportScreen from '../sync/ExportScreen';
 import OfflineBanner from '../ui/OfflineBanner';
 import RouteNotice from '../monitoring/RouteNotice';
-import { startDeviceMonitor, stopDeviceMonitor } from '../monitoring/deviceMonitor';
+import { setWipeHandler, startDeviceMonitor, stopDeviceMonitor } from '../monitoring/deviceMonitor';
+import { runRemoteWipe } from '../auth/localWipe';
+
+setWipeHandler(runRemoteWipe);
 import { useAuthStore } from '../store/authStore';
 import { useServerStore } from '../store/serverStore';
 import { useBrandingStore } from '../store/brandingStore';
