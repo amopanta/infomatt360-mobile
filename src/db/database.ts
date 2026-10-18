@@ -163,6 +163,23 @@ function initializeDatabase(database: SQLite.SQLiteDatabase): void {
   database.execSync(`
     CREATE INDEX IF NOT EXISTS idx_crash_logs_created ON crash_logs(created_at);
   `);
+
+  // Recorrido del gestor: se guarda aquí aunque no haya señal y se envía
+  // con el siguiente latido (POST /field-devices/heartbeat).
+  database.execSync(`
+    CREATE TABLE IF NOT EXISTS route_points (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id TEXT,
+      latitude REAL NOT NULL,
+      longitude REAL NOT NULL,
+      accuracy_m REAL,
+      recorded_at TEXT NOT NULL,
+      sent INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  database.execSync(`
+    CREATE INDEX IF NOT EXISTS idx_route_points_sent ON route_points(sent, recorded_at);
+  `);
 }
 
 // ── Operaciones de la cola offline ───────────────────────────────────
@@ -1141,4 +1158,81 @@ export function getParticipantCount(projectId: string): number {
     [projectId],
   );
   return row?.count ?? 0;
+}
+
+// ── Monitoreo del equipo y recorrido ─────────────────────────────────
+
+/** Lo que el supervisor ve en la web (Equipos de campo). */
+export function getDeviceQueueSummary(): {
+  pending: number;
+  error: number;
+  conflict: number;
+  draft: number;
+  pendingEvidence: number;
+  oldestPendingAt: string | null;
+  recentErrors: { at: string | null; message: string }[];
+} {
+  const db = getDatabase();
+  const counts = db.getAllSync<{ status: string; cnt: number }>(
+    `SELECT status, COUNT(*) as cnt FROM queued_records GROUP BY status`,
+  );
+  const by = Object.fromEntries(counts.map((r) => [r.status, r.cnt])) as Record<string, number>;
+  const oldest = db.getFirstSync<{ created_at: string | null }>(
+    `SELECT MIN(created_at) as created_at FROM queued_records WHERE status IN ('pending', 'error', 'conflict')`,
+  );
+  // Errores de registros (rechazos o fallos de envío) y de la app, más recientes primero
+  const recordErrors = db.getAllSync<{ at: string; message: string }>(
+    `SELECT updated_at as at, error_message as message FROM queued_records
+     WHERE error_message IS NOT NULL AND status IN ('pending', 'error')
+     ORDER BY updated_at DESC LIMIT 10`,
+  );
+  const crashErrors = db.getAllSync<{ at: string; message: string }>(
+    `SELECT created_at as at, message FROM crash_logs ORDER BY created_at DESC LIMIT 5`,
+  );
+  const recentErrors = [...recordErrors, ...crashErrors]
+    .sort((a, b) => (b.at ?? '').localeCompare(a.at ?? ''))
+    .slice(0, 20)
+    .map((e) => ({ at: sqliteToIso(e.at), message: String(e.message).slice(0, 500) }));
+  return {
+    pending: by.pending ?? 0,
+    error: by.error ?? 0,
+    conflict: by.conflict ?? 0,
+    draft: by.draft ?? 0,
+    pendingEvidence: getPendingEvidenceCount(),
+    oldestPendingAt: sqliteToIso(oldest?.created_at ?? null),
+    recentErrors,
+  };
+}
+
+/** datetime('now') de SQLite ("2026-10-18 14:05:00", UTC) → ISO con Z */
+export function sqliteToIso(value: string | null): string | null {
+  if (!value) return null;
+  return /[zZ]|[+-]\d\d:?\d\d$/.test(value) ? value : `${value.replace(' ', 'T')}Z`;
+}
+
+export function insertRoutePoint(point: { projectId: string | null; latitude: number; longitude: number; accuracy: number | null; recordedAt: string }): void {
+  getDatabase().runSync(
+    `INSERT INTO route_points (project_id, latitude, longitude, accuracy_m, recorded_at) VALUES (?, ?, ?, ?, ?)`,
+    [point.projectId, point.latitude, point.longitude, point.accuracy, point.recordedAt],
+  );
+}
+
+export function listUnsentRoutePoints(limit = 1000): { id: number; project_id: string | null; latitude: number; longitude: number; accuracy_m: number | null; recorded_at: string }[] {
+  return getDatabase().getAllSync(
+    `SELECT id, project_id, latitude, longitude, accuracy_m, recorded_at FROM route_points WHERE sent = 0 ORDER BY recorded_at ASC LIMIT ?`,
+    [limit],
+  ) as any;
+}
+
+export function markRoutePointsSent(ids: number[]): void {
+  if (!ids.length) return;
+  getDatabase().runSync(`UPDATE route_points SET sent = 1 WHERE id IN (${ids.map(() => '?').join(',')})`, ids);
+}
+
+/** Solo borra puntos ya recibidos por el servidor; los no enviados se conservan. */
+export function purgeSentRoutePoints(retentionDays = 7): void {
+  getDatabase().runSync(
+    `DELETE FROM route_points WHERE sent = 1 AND recorded_at < ?`,
+    [new Date(Date.now() - retentionDays * 86_400_000).toISOString()],
+  );
 }

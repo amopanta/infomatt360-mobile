@@ -12,6 +12,7 @@
 import * as Crypto from 'expo-crypto';
 import * as Network from 'expo-network';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as SecureStore from 'expo-secure-store';
 import { ENV } from '../config/env';
 import { bulkSaveRecords, uploadEvidence } from '../api/syncApi';
 import {
@@ -54,6 +55,21 @@ function setStatus(s: SyncStatus) {
 
 export function getSyncStatus(): SyncStatus {
   return status;
+}
+
+// Última vez que el equipo quedó al día con el servidor (se informa en el
+// latido de monitoreo). Se guarda para conservarla entre reinicios.
+const LAST_SYNC_KEY = 'last_successful_sync_at';
+let lastSuccessfulSyncAt: string | null = null;
+SecureStore.getItemAsync(LAST_SYNC_KEY).then((v) => { lastSuccessfulSyncAt = lastSuccessfulSyncAt ?? v; }).catch(() => {});
+
+function noteSyncedUpToDate(): void {
+  lastSuccessfulSyncAt = new Date().toISOString();
+  SecureStore.setItemAsync(LAST_SYNC_KEY, lastSuccessfulSyncAt).catch(() => {});
+}
+
+export function getLastSuccessfulSyncAt(): string | null {
+  return lastSuccessfulSyncAt;
 }
 
 // ── Control del ciclo ────────────────────────────────────────────────
@@ -114,6 +130,7 @@ async function tick(): Promise<void> {
   // Nada pendiente: dormir al intervalo base
   const pending = getPendingCount();
   if (pending === 0) {
+    noteSyncedUpToDate();
     setStatus('idle');
     scheduleNext(currentInterval);
     return;
@@ -240,6 +257,7 @@ export async function syncNow(): Promise<boolean> {
 
     // 5. Limpieza automatica de sincronizados antiguos (doc 107)
     purgeOldSynced(ENV.SYNCED_RETENTION_DAYS);
+    if (!hadFailures && getPendingCount() === 0) noteSyncedUpToDate();
   } finally {
     isSyncing = false;
     setStatus('idle');

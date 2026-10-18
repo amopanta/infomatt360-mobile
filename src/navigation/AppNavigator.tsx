@@ -38,6 +38,8 @@ import SyncStatusScreen from '../sync/SyncStatusScreen';
 import ConflictResolutionScreen from '../sync/ConflictResolutionScreen';
 import ExportScreen from '../sync/ExportScreen';
 import OfflineBanner from '../ui/OfflineBanner';
+import RouteNotice from '../monitoring/RouteNotice';
+import { startDeviceMonitor, stopDeviceMonitor } from '../monitoring/deviceMonitor';
 import { useAuthStore } from '../store/authStore';
 import { useServerStore } from '../store/serverStore';
 import { useBrandingStore } from '../store/brandingStore';
@@ -491,6 +493,15 @@ export default function AppNavigator() {
     if (sessionReady) startAutoSync();
   }, [sessionReady]);
 
+  // Monitoreo del equipo y recorrido: solo con sesión abierta y proyecto
+  // elegido; al cerrar sesión se detiene (los puntos guardados se conservan).
+  const monitorReady = sessionReady && !!activeProjectId;
+  useEffect(() => {
+    if (!monitorReady) return;
+    startDeviceMonitor();
+    return () => stopDeviceMonitor();
+  }, [monitorReady, activeProjectId]);
+
   if (loading) {
     return (
       <View
@@ -543,6 +554,7 @@ export default function AppNavigator() {
             )}
           </Stack.Navigator>
         )}
+        {monitorReady && !needsPinUnlock && !shouldOfferPinSetup && <RouteNotice />}
       </View>
     </NavigationContainer>
   );
