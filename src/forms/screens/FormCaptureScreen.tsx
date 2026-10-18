@@ -15,6 +15,7 @@ import {
   TouchableOpacity,
   StyleSheet,
   Alert,
+  AppState,
 } from 'react-native';
 import { useRoute, useNavigation, CommonActions } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -139,57 +140,45 @@ export default function FormCaptureScreen() {
     })();
   }, []);
 
-  // Auto-guardado cada 30 segundos
-  useEffect(() => {
-    if (!activeProjectId || !formId) return;
-
-    const interval = setInterval(() => {
-      if (submittedRef.current) return;
-      const hasData = Object.keys(values).length > 0;
-      if (!hasData) return;
-
-      const recordValues = Object.entries(values).map(([fieldId, val]) => ({
-        field_id: fieldId,
-        field_name: fieldId,
-        field_value_json: val,
-      }));
-
+  // Autoguardado del borrador (H05). Antes: un intervalo de 30 s que se
+  // reiniciaba con cada tecla (nunca guardaba mientras se escribía) y un
+  // guardado al salir que veía los valores vacíos del primer instante.
+  // Ahora: 1,5 s después de cada cambio, al pasar a segundo plano y al salir,
+  // siempre con los valores más recientes.
+  const latestDraft = useRef({ values, gps });
+  latestDraft.current = { values, gps };
+  const persistDraft = useCallback(() => {
+    if (submittedRef.current || !activeProjectId || !formId) return;
+    const { values: current, gps: currentGps } = latestDraft.current;
+    if (Object.keys(current).length === 0) return;
+    try {
       saveAutoDraft({
         localId: draftLocalId,
         projectId: activeProjectId,
         templateId: formId,
-        data: recordValues,
-        gps: gps ? { lat: gps.lat, lng: gps.lng, accuracy: gps.accuracy } : null,
+        participantId,
+        data: Object.entries(current).map(([fieldId, val]) => ({ field_id: fieldId, field_name: fieldId, field_value_json: val })),
+        gps: currentGps ? { lat: currentGps.lat, lng: currentGps.lng, accuracy: currentGps.accuracy } : null,
       });
-    }, 30000);
+    } catch {
+      // Sin espacio u otro error de la base: se reintenta en el próximo cambio.
+    }
+  }, [activeProjectId, formId, draftLocalId, participantId]);
 
-    return () => clearInterval(interval);
-  }, [activeProjectId, formId, values, gps, draftLocalId]);
-
-  // Limpiar auto-draft al desmontar si no fue enviado
   useEffect(() => {
+    const timer = setTimeout(persistDraft, 1500);
+    return () => clearTimeout(timer);
+  }, [values, gps, persistDraft]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') persistDraft();
+    });
     return () => {
-      if (!submittedRef.current) {
-        // Si hay datos, guardar una ultima vez antes de salir
-        const hasData = Object.keys(values).length > 0;
-        if (hasData && activeProjectId) {
-          const recordValues = Object.entries(values).map(([fieldId, val]) => ({
-            field_id: fieldId,
-            field_name: fieldId,
-            field_value_json: val,
-          }));
-          saveAutoDraft({
-            localId: draftLocalId,
-            projectId: activeProjectId,
-            templateId: formId,
-            data: recordValues,
-            gps: gps ? { lat: gps.lat, lng: gps.lng, accuracy: gps.accuracy } : null,
-          });
-        }
-      }
+      sub.remove();
+      persistDraft();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [persistDraft]);
 
   // Cambiar valor de un campo — limpia error al editar
   const handleFieldChange = useCallback((fieldId: string, value: unknown) => {
@@ -372,9 +361,6 @@ export default function FormCaptureScreen() {
     submittedRef.current = true;
 
     try {
-      // Eliminar auto-draft antes de crear el registro real
-      deleteAutoDraft(draftLocalId);
-
       const recordLocalId = uuidv4();
 
       // Construir valores para el Record Engine (doc 25)
@@ -400,6 +386,10 @@ export default function FormCaptureScreen() {
       // Registrar como evidencia cada archivo que quedó en las respuestas
       // (fotos, PDF, audio, video, archivos, huellas), con su tipo real.
       registerFieldEvidence(recordLocalId, values);
+
+      // El borrador se borra solo después de guardar el registro: si algo
+      // falla antes, las respuestas siguen a salvo en el borrador.
+      deleteAutoDraft(draftLocalId);
 
       // Envío automático, ya con las evidencias registradas: si hay señal sale
       // ya; si no, lo envía el ciclo automático o el aviso de reconexión.

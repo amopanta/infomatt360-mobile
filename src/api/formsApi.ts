@@ -32,6 +32,7 @@ type BackendRuntimeTemplate = {
   description?: string | null;
   status: string;
   access_mode?: string;
+  version_hash?: string;
   pages: {
     id: string;
     title: string;
@@ -161,6 +162,14 @@ function toPages(runtime: BackendRuntimeTemplate): FormPage[] {
   }));
 }
 
+export type OfflineManifestItem = { template_id: string; name: string; version_hash: string; access_mode: string; updated_at: string | null };
+
+/** Formularios que el usuario puede capturar, con la huella de su versión (H01). */
+export async function getOfflineManifest(projectId: string): Promise<OfflineManifestItem[]> {
+  const { data } = await api.get<OfflineManifestItem[]>(`/runtime/offline-manifest/${projectId}`);
+  return data;
+}
+
 /** Descarga las plantillas publicadas del proyecto con su estructura completa */
 export async function getProjectForms(projectId: string): Promise<FormTemplate[]> {
   const { data } = await api.get<BackendTemplate[]>(`/builder/templates/${projectId}`);
@@ -188,6 +197,7 @@ export async function getFormDetail(formId: string, summary?: BackendTemplate): 
     pages: toPages(data),
     published: data.status === 'published',
     accessMode: data.access_mode ?? 'legacy',
+    versionHash: data.version_hash ?? '',
     created_at: summary?.created_at ?? '',
     updated_at: summary?.updated_at ?? '',
   };

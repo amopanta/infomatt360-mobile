@@ -186,6 +186,17 @@ function initializeDatabase(database: SQLite.SQLiteDatabase): void {
   try {
     database.execSync(`ALTER TABLE form_templates ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'legacy';`);
   } catch { /* columna ya existe */ }
+  // Versión de formularios (H01): huella del servidor, formularios retirados
+  // (despublicados) que se conservan mientras haya borradores o pendientes, y
+  // la versión con la que se empezó cada registro.
+  for (const ddl of [
+    `ALTER TABLE form_templates ADD COLUMN version_hash TEXT`,
+    `ALTER TABLE form_templates ADD COLUMN retired INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE form_templates ADD COLUMN server_updated_at TEXT`,
+    `ALTER TABLE queued_records ADD COLUMN template_version TEXT`,
+  ]) {
+    try { database.execSync(`${ddl};`); } catch { /* columna ya existe */ }
+  }
   database.execSync(`
     CREATE TABLE IF NOT EXISTS form_assignments_cache (
       project_id TEXT NOT NULL,
@@ -217,12 +228,14 @@ export function enqueueRecord(record: {
   data: unknown[];
   evidencePaths: string[];
   gps?: { lat: number; lng: number; accuracy: number };
+  /** Versión del formulario con la que se capturó (por defecto, la vigente) */
+  templateVersion?: string | null;
 }): void {
   const db = getDatabase();
   db.runSync(
     `INSERT INTO queued_records
-       (local_id, project_id, template_id, participant_id, status, data_json, evidence_paths_json, gps_json)
-     VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)`,
+       (local_id, project_id, template_id, participant_id, status, data_json, evidence_paths_json, gps_json, template_version)
+     VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
     [
       record.localId,
       record.projectId,
@@ -231,6 +244,7 @@ export function enqueueRecord(record: {
       JSON.stringify(record.data),
       JSON.stringify(record.evidencePaths),
       record.gps ? JSON.stringify(record.gps) : null,
+      record.templateVersion ?? getFormVersion(record.templateId)?.version_hash ?? null,
     ],
   );
 }
@@ -437,7 +451,9 @@ export function updateQueuedRecord(localId: string, data: unknown[], gps?: { lat
   db.runSync(
     `UPDATE queued_records
      SET data_json = ?, gps_json = ?, status = 'pending', error_message = NULL,
-         updated_at = datetime('now'), server_data_json = NULL, server_record_id = NULL, server_updated_at = NULL
+         updated_at = datetime('now'), server_data_json = NULL, server_record_id = NULL, server_updated_at = NULL,
+         -- Al guardar, el gestor ya revisó las respuestas con la versión vigente
+         template_version = COALESCE((SELECT version_hash FROM form_templates f WHERE f.id = queued_records.template_id), template_version)
      WHERE local_id = ?`,
     [
       JSON.stringify(data),
@@ -452,6 +468,8 @@ export function saveAutoDraft(params: {
   localId: string;
   projectId: string;
   templateId: string;
+  /** Antes no se guardaba: un borrador de formulario cerrado quedaba sin participante */
+  participantId?: string | null;
   data: unknown[];
   gps?: { lat: number; lng: number; accuracy: number } | null;
 }): void {
@@ -468,14 +486,16 @@ export function saveAutoDraft(params: {
   } else {
     db.runSync(
       `INSERT INTO queued_records
-         (local_id, project_id, template_id, participant_id, status, data_json, evidence_paths_json, gps_json)
-       VALUES (?, ?, ?, NULL, 'draft', ?, '[]', ?)`,
+         (local_id, project_id, template_id, participant_id, status, data_json, evidence_paths_json, gps_json, template_version)
+       VALUES (?, ?, ?, ?, 'draft', ?, '[]', ?, ?)`,
       [
         params.localId,
         params.projectId,
         params.templateId,
+        params.participantId ?? null,
         JSON.stringify(params.data),
         params.gps ? JSON.stringify(params.gps) : null,
+        getFormVersion(params.templateId)?.version_hash ?? null,
       ],
     );
   }
@@ -1000,10 +1020,11 @@ export function getCachedForms(projectId: string): {
   name: string;
   description: string | null;
   schema_json: string;
+  server_updated_at: string | null;
 }[] {
   const db = getDatabase();
   return db.getAllSync(
-    `SELECT * FROM form_templates WHERE project_id = ? ORDER BY name`,
+    `SELECT * FROM form_templates WHERE project_id = ? AND retired = 0 ORDER BY name`,
     [projectId],
   ) as any;
 }
@@ -1207,6 +1228,8 @@ export function getParticipantFormStatus(
        AND qr.participant_id = ?
        AND qr.status != 'draft'
      WHERE ft.project_id = ?
+       -- Retirados (H01): solo si ya tienen respuesta, para poder verla
+       AND (ft.retired = 0 OR qr.local_id IS NOT NULL)
      ORDER BY ft.name`,
     [participantId, projectId],
   ) as any;
@@ -1376,4 +1399,78 @@ export function getLocalRecordStatus(templateId: string, participantId: string):
     [templateId, participantId],
   );
   return row?.status ?? null;
+}
+
+// ── Paquete de formularios versionado (H01) ─────────────────────────
+
+export interface CachedFormInput {
+  id: string;
+  projectId: string;
+  templateId: string;
+  name: string;
+  description?: string;
+  schemaJson: string;
+  accessMode?: string;
+  versionHash: string;
+  serverUpdatedAt?: string | null;
+}
+
+export function getFormVersion(formId: string): { version_hash: string | null; retired: number; server_updated_at: string | null } | null {
+  return getDatabase().getFirstSync(
+    `SELECT version_hash, retired, server_updated_at FROM form_templates WHERE id = ?`,
+    [formId],
+  ) as any;
+}
+
+/** Huella de cada formulario guardado en el teléfono para el proyecto. */
+export function getCachedFormVersions(projectId: string): Map<string, string | null> {
+  const rows = getDatabase().getAllSync<{ id: string; version_hash: string | null }>(
+    `SELECT id, version_hash FROM form_templates WHERE project_id = ?`,
+    [projectId],
+  );
+  return new Map(rows.map((r) => [r.id, r.version_hash]));
+}
+
+/**
+ * Aplica el paquete de formularios en una sola transacción: guarda los que
+ * cambiaron, retira los que el servidor ya no ofrece y borra del todo los
+ * retirados que no tienen registros en el teléfono. Un formulario retirado
+ * con borradores o pendientes se conserva para poder terminarlos y enviarlos.
+ */
+export function applyFormPackage(projectId: string, changed: CachedFormInput[], activeIds: string[]): { retired: number; removed: number } {
+  const db = getDatabase();
+  db.execSync('BEGIN');
+  try {
+    for (const f of changed) {
+      db.runSync(
+        `INSERT OR REPLACE INTO form_templates
+           (id, project_id, template_id, version, name, description, schema_json, access_mode, version_hash, retired, server_updated_at, downloaded_at)
+         VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, 0, ?, datetime('now'))`,
+        [f.id, f.projectId, f.templateId, f.name, f.description ?? null, f.schemaJson, f.accessMode ?? 'legacy', f.versionHash, f.serverUpdatedAt ?? null],
+      );
+    }
+    const marks = activeIds.map(() => '?').join(',');
+    if (activeIds.length) db.runSync(`UPDATE form_templates SET retired = 0 WHERE project_id = ? AND id IN (${marks})`, [projectId, ...activeIds]);
+    const retired = db.runSync(
+      `UPDATE form_templates SET retired = 1 WHERE project_id = ? AND retired = 0${activeIds.length ? ` AND id NOT IN (${marks})` : ''}`,
+      [projectId, ...activeIds],
+    ).changes;
+    const removed = db.runSync(
+      `DELETE FROM form_templates WHERE project_id = ? AND retired = 1
+         AND NOT EXISTS (SELECT 1 FROM queued_records q WHERE q.template_id = form_templates.id)`,
+      [projectId],
+    ).changes;
+    db.execSync('COMMIT');
+    return { retired, removed };
+  } catch (error) {
+    db.execSync('ROLLBACK');
+    throw error;
+  }
+}
+
+export function getRecordTemplateVersion(localId: string): string | null {
+  return getDatabase().getFirstSync<{ template_version: string | null }>(
+    `SELECT template_version FROM queued_records WHERE local_id = ?`,
+    [localId],
+  )?.template_version ?? null;
 }

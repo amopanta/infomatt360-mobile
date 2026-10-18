@@ -111,6 +111,8 @@ export interface FormTemplate {
   published: boolean;
   /** legacy | open | closed: reglas de asignación (ver assignmentRules) */
   accessMode?: string;
+  /** Huella de la versión en el servidor (H01) */
+  versionHash?: string;
   created_at: string;
   updated_at: string;
 }

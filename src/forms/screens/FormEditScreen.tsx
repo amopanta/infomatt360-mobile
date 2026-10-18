@@ -33,10 +33,13 @@ import {
   getQueuedRecord,
   updateQueuedRecord,
   getRecordEvidence,
+  getFormVersion,
+  getRecordTemplateVersion,
 } from '../../db/database';
 import type { FormPage, FormSection, FormComponent, GpsCoordinate, RecordValue } from '../../types';
 import { compressImage, FIELD_CAMERA_OPTIONS } from '../../utils/imageCompressor';
 import { persistEvidenceFile, registerFieldEvidence } from '../../evidence/evidenceFiles';
+import { draftVersionChanged } from '../formPackagePlan';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
 export default function FormEditScreen() {
@@ -78,6 +81,13 @@ export default function FormEditScreen() {
       setFormName(cached.name);
       parsedPages = JSON.parse(cached.schema_json);
       setPages(parsedPages);
+      // H01: el formulario pudo cambiar o retirarse desde que se empezó.
+      const current = getFormVersion(record.template_id);
+      if (current?.retired) {
+        Alert.alert('Formulario retirado', 'Este formulario ya no se ofrece para capturas nuevas. Puede terminar y enviar este borrador.');
+      } else if (draftVersionChanged(getRecordTemplateVersion(recordLocalId), current?.version_hash)) {
+        Alert.alert('Formulario actualizado', 'El formulario cambió desde que empezó este borrador. Sus respuestas se conservan; revise las preguntas nuevas antes de enviar.');
+      }
     }
 
     // Restaurar valores guardados

@@ -22,9 +22,9 @@ import {
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { getProjectForms } from '../../api/formsApi';
+import { syncFormPackage } from '../formPackage';
 import { downloadProjectPackage } from '../../participants/offlinePackage';
-import { getCachedForms, cacheFormTemplate, getRecordCountsByTemplate } from '../../db/database';
+import { getCachedForms, getRecordCountsByTemplate } from '../../db/database';
 import { useAuthStore } from '../../store/authStore';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
@@ -34,6 +34,7 @@ interface CachedForm {
   description: string | null;
   version: number;
   template_id: string;
+  server_updated_at: string | null;
 }
 
 type RecordCounts = Record<string, { pending: number; synced: number; error: number; draft: number }>;
@@ -45,6 +46,7 @@ export default function FormListScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [recordCounts, setRecordCounts] = useState<RecordCounts>({});
+  const [updateNote, setUpdateNote] = useState('');
 
   // Cargar desde cache local
   const loadCached = useCallback(() => {
@@ -59,19 +61,14 @@ export default function FormListScreen() {
     if (!activeProjectId) return;
     setRefreshing(true);
     try {
-      const remote = await getProjectForms(activeProjectId);
-      for (const form of remote) {
-        cacheFormTemplate({
-          id: form.id,
-          projectId: activeProjectId,
-          templateId: form.templateId,
-          version: form.version,
-          name: form.name,
-          description: form.description,
-          schemaJson: JSON.stringify(form.pages),
-          accessMode: form.accessMode,
-        });
-      }
+      // H01: solo baja lo nuevo o cambiado y lo aplica todo junto.
+      const result = await syncFormPackage(activeProjectId);
+      const parts = [
+        result.added && `${result.added} nuevo${result.added !== 1 ? 's' : ''}`,
+        result.updated && `${result.updated} actualizado${result.updated !== 1 ? 's' : ''}`,
+        result.retired && `${result.retired} retirado${result.retired !== 1 ? 's' : ''}`,
+      ].filter(Boolean);
+      setUpdateNote(parts.length ? `Formularios: ${parts.join(', ')}` : 'Formularios al día');
       // Preparación con conexión: participantes y asignaciones para trabajar sin red.
       await downloadProjectPackage(activeProjectId).catch(() => {});
       loadCached();
@@ -127,8 +124,11 @@ export default function FormListScreen() {
           <Text style={styles.formName} numberOfLines={1}>
             {item.name}
           </Text>
-          <Text style={styles.versionBadge}>v{item.version}</Text>
+          <Text style={styles.versionBadge}>✓ Sin conexión</Text>
         </View>
+        {item.server_updated_at ? (
+          <Text style={styles.updatedAt}>Versión del {formatVersionDate(item.server_updated_at)}</Text>
+        ) : null}
         {item.description ? (
           <Text style={styles.formDesc} numberOfLines={2}>
             {item.description}
@@ -188,6 +188,7 @@ export default function FormListScreen() {
             {filteredForms.length} resultado{filteredForms.length !== 1 ? 's' : ''}
           </Text>
         )}
+        {updateNote ? <Text style={styles.updatedAt}>{updateNote}</Text> : null}
       </View>
 
       <FlatList
@@ -218,7 +219,14 @@ export default function FormListScreen() {
   );
 }
 
+/** Fecha corta de la versión ("18 oct 2026"); el servidor guarda UTC sin zona. */
+function formatVersionDate(value: string): string {
+  const date = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(value) ? value : `${value}Z`);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('es-CO', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
 const styles = StyleSheet.create({
+  updatedAt: { fontSize: fontSize.caption, color: colors.textSecondary, marginTop: 2 },
   container: {
     flex: 1,
     backgroundColor: colors.background,
