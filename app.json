@@ -36,7 +36,8 @@
         "READ_MEDIA_IMAGES",
         "READ_MEDIA_VIDEO",
         "RECORD_AUDIO"
-      ]
+      ],
+      "allowBackup": false
     },
     "plugins": [
       [
