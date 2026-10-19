@@ -33,6 +33,7 @@ interface LocalRecord {
   data_json: string;
   gps_json: string | null;
   error_message: string | null;
+  observations_json?: string | null;
   created_at: string;
   synced_at: string | null;
   evidence_count: number;
@@ -43,15 +44,18 @@ export default function DraftsScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<any>>();
   const [records, setRecords] = useState<LocalRecord[]>([]);
   const [refreshing, setRefreshing] = useState(false);
-  const [filter, setFilter] = useState<'all' | 'pending' | 'error' | 'synced'>('all');
+  const [filter, setFilter] = useState<'all' | 'pending' | 'error' | 'synced' | 'corrections'>('all');
 
   const loadRecords = useCallback(() => {
     const db = getDatabase();
-    const whereClause = filter === 'all' ? '' : `WHERE q.status = '${filter}'`;
+    // Correcciones (docs/141): devueltas para corregir, por enviar, en conflicto o rechazadas
+    const whereClause = filter === 'all' ? '' : filter === 'corrections'
+      ? `WHERE q.status IN ('returned', 'correction_pending', 'correction_conflict', 'correction_error')`
+      : `WHERE q.status = '${filter}'`;
     const rows = db.getAllSync(`
       SELECT
         q.local_id, q.project_id, q.template_id, q.status,
-        q.data_json, q.gps_json, q.error_message,
+        q.data_json, q.gps_json, q.error_message, q.observations_json,
         q.created_at, q.synced_at,
         (SELECT COUNT(*) FROM evidence e WHERE e.record_local_id = q.local_id) as evidence_count,
         ft.name as form_name
@@ -114,6 +118,10 @@ export default function DraftsScreen() {
     syncing: { label: 'Enviando', color: colors.primary },
     synced: { label: 'Sincronizado', color: colors.success },
     error: { label: 'Error', color: colors.error },
+    returned: { label: 'Devuelto: corregir', color: colors.accent },
+    correction_pending: { label: 'Corrección por enviar', color: colors.warning },
+    correction_conflict: { label: 'Corrección en conflicto', color: colors.error },
+    correction_error: { label: 'Corrección rechazada', color: colors.error },
   };
 
   const renderRecord = ({ item }: { item: LocalRecord }) => {
@@ -126,7 +134,7 @@ export default function DraftsScreen() {
       <TouchableOpacity
         style={styles.card}
         onPress={() => {
-          if (item.status === 'draft' || item.status === 'pending' || item.status === 'error') {
+          if (['draft', 'pending', 'error', 'returned', 'correction_pending', 'correction_conflict', 'correction_error'].includes(item.status)) {
             navigation.navigate('FormEdit', {
               recordLocalId: item.local_id,
             });
@@ -164,6 +172,11 @@ export default function DraftsScreen() {
           )}
         </View>
 
+        {item.observations_json && item.status === 'returned' ? (
+          <Text style={styles.metaItem}>
+            📝 {(JSON.parse(item.observations_json) as { status: string }[]).filter((o) => ['pending', 'in_correction', 'rejected'].includes(o.status)).length} observación(es) por atender
+          </Text>
+        ) : null}
         {item.error_message && (
           <Text style={styles.errorText} numberOfLines={2}>
             {item.error_message}
@@ -186,6 +199,7 @@ export default function DraftsScreen() {
     { key: 'pending', label: `Pendientes` },
     { key: 'error', label: `Errores` },
     { key: 'synced', label: `Enviados` },
+    { key: 'corrections', label: `Correcciones` },
   ];
 
   return (
@@ -251,6 +265,8 @@ const styles = StyleSheet.create({
   },
   filters: {
     flexDirection: 'row',
+    // Con cinco filtros no caben en un teléfono: pasan a otra línea
+    flexWrap: 'wrap',
     padding: spacing.sm,
     paddingHorizontal: spacing.md,
     backgroundColor: colors.surface,

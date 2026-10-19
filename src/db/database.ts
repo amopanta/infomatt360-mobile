@@ -260,6 +260,9 @@ function initializeDatabase(database: SQLite.SQLiteDatabase): void {
     `ALTER TABLE form_templates ADD COLUMN retired INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE form_templates ADD COLUMN server_updated_at TEXT`,
     `ALTER TABLE queued_records ADD COLUMN template_version TEXT`,
+    // Correcciones de registros devueltos (docs/141): versión y observaciones
+    `ALTER TABLE queued_records ADD COLUMN lock_version INTEGER`,
+    `ALTER TABLE queued_records ADD COLUMN observations_json TEXT`,
   ]) {
     try { database.execSync(`${ddl};`); } catch { /* columna ya existe */ }
   }
@@ -1544,6 +1547,6 @@ export function getRecordTemplateVersion(localId: string): string | null {
 /** Registros del usuario activo que aún no están en el servidor. */
 export function getUnsentCount(): number {
   return getDatabase().getFirstSync<{ n: number }>(
-    `SELECT COUNT(*) as n FROM queued_records WHERE status IN ('pending', 'error', 'conflict', 'draft')`,
+    `SELECT COUNT(*) as n FROM queued_records WHERE status IN ('pending', 'error', 'conflict', 'draft', 'correction_pending', 'correction_conflict', 'correction_error')`,
   )?.n ?? 0;
 }

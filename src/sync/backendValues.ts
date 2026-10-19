@@ -88,3 +88,29 @@ export function nestRepeatValues(flat: Map<string, unknown>): Map<string, unknow
   }
   return out;
 }
+
+/**
+ * Inverso de nestRepeatValues: lo que guarda el servidor (`[{id, index,
+ * values}]`) vuelve a claves indexadas de la app ("integrantes[0].nombre"),
+ * para corregir en la tablet un registro devuelto (docs/141 §7).
+ */
+export function flattenServerValues(values: { field_name: string; field_value_json: string }[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const isRows = (v: unknown): v is { values: Record<string, unknown> }[] =>
+    Array.isArray(v) && v.length > 0 && v.every((row) => row && typeof row === 'object' && 'values' in (row as object));
+  const visit = (prefix: string, value: unknown) => {
+    if (isRows(value)) {
+      value.forEach((row, index) => {
+        for (const [key, child] of Object.entries(row.values ?? {})) visit(`${prefix}[${index}].${key}`, child);
+      });
+    } else {
+      out[prefix] = value;
+    }
+  };
+  for (const v of values) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(v.field_value_json); } catch { parsed = v.field_value_json; }
+    visit(v.field_name, parsed);
+  }
+  return out;
+}

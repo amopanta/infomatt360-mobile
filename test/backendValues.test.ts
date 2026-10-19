@@ -48,3 +48,17 @@ describe('contrato de valores con el backend (H03/H06)', () => {
     expect(out.soportes).toEqual([asset('A'), asset('B')]);
   });
 });
+
+describe('registro devuelto del servidor a la tablet (docs/141)', () => {
+  it('flattenServerValues es el inverso de nestRepeatValues', async () => {
+    const { flattenServerValues } = await import('../src/sync/backendValues');
+    const flat = new Map<string, unknown>([
+      ['nombre', 'Ana'],
+      ['integrantes[0].nombre', 'Luis'],
+      ['integrantes[0].contactos[0].tel', '310'],
+      ['integrantes[1].nombre', 'Eva'],
+    ]);
+    const server = [...nestRepeatValues(flat)].map(([field_name, value]) => ({ field_name, field_value_json: JSON.stringify(value) }));
+    expect(flattenServerValues(server)).toEqual(Object.fromEntries(flat));
+  });
+});

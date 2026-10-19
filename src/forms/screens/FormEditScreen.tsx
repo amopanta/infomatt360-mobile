@@ -40,6 +40,9 @@ import type { FormPage, FormSection, FormComponent, GpsCoordinate, RecordValue }
 import { compressImage, FIELD_CAMERA_OPTIONS } from '../../utils/imageCompressor';
 import { persistEvidenceFile, registerFieldEvidence } from '../../evidence/evidenceFiles';
 import { draftVersionChanged } from '../formPackagePlan';
+import CorrectionBanner from '../../corrections/CorrectionBanner';
+import { CORRECTION_STATUSES, discardCorrection, getCorrection, saveCorrectionEdits, type ServerObservation } from '../../corrections/correctionStore';
+import { requestSync } from '../../sync/syncService';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
 export default function FormEditScreen() {
@@ -60,6 +63,11 @@ export default function FormEditScreen() {
   const [signatureFieldId, setSignatureFieldId] = useState<string | null>(null);
   const [fingerprintFieldId, setFingerprintFieldId] = useState<string | null>(null);
   const [repeatCounts, setRepeatCounts] = useState<Record<string, number>>({});
+  // Corrección de un registro devuelto (docs/141): observaciones del revisor
+  const [correctionStatus, setCorrectionStatus] = useState<string | null>(null);
+  const [correctionError, setCorrectionError] = useState<string | null>(null);
+  const [observations, setObservations] = useState<ServerObservation[]>([]);
+  const [checkedObservations, setCheckedObservations] = useState<Set<string>>(new Set());
 
   // Cargar registro y formulario
   useEffect(() => {
@@ -99,6 +107,20 @@ export default function FormEditScreen() {
       restoredValues[rv.field_id] = rv.field_value_json;
     }
     setValues(restoredValues);
+
+    if ((CORRECTION_STATUSES as readonly string[]).includes(record.status)) {
+      const correction = getCorrection(recordLocalId);
+      const obs = JSON.parse(correction?.observations_json || '[]') as ServerObservation[];
+      setCorrectionStatus(record.status);
+      setCorrectionError(correction?.error_message ?? null);
+      setObservations(obs);
+      // Las preguntas observadas se marcan con el motivo del revisor
+      const marks = new Map<string, string>();
+      for (const o of obs) {
+        if (o.field_name && ['pending', 'in_correction', 'rejected'].includes(o.status)) marks.set(o.repeat_path || o.field_name, `Observación: ${o.reason}`);
+      }
+      setErrors(marks);
+    }
 
     // Restaurar contadores de repeat groups desde los valores guardados
     const counts: Record<string, number> = {};
@@ -294,6 +316,18 @@ export default function FormEditScreen() {
     }
 
     setSaving(true);
+    if (correctionStatus) {
+      try {
+        saveCorrectionEdits(recordLocalId, formValues, [...checkedObservations]);
+        void requestSync();
+        Alert.alert('Corrección guardada', 'Se enviará al servidor en cuanto haya conexión.', [{ text: 'OK', onPress: () => navigation.goBack() }]);
+      } catch (err: any) {
+        Alert.alert('Error', err.message ?? 'No se pudo guardar');
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
     try {
       const recordValues: RecordValue[] = Object.entries(formValues).map(
         ([fieldId, val]) => ({
@@ -321,7 +355,7 @@ export default function FormEditScreen() {
     } finally {
       setSaving(false);
     }
-  }, [recordLocalId, pages, values, formValues, repeatCounts, gps, newEvidencePaths, navigation]);
+  }, [recordLocalId, pages, values, formValues, repeatCounts, gps, newEvidencePaths, navigation, correctionStatus, checkedObservations]);
 
   // Secciones de la pagina actual
   const page = pages[currentPage];
@@ -400,6 +434,33 @@ export default function FormEditScreen() {
       />
 
       <ScrollView style={styles.fields} contentContainerStyle={styles.fieldsContent}>
+        {correctionStatus ? (
+          <CorrectionBanner
+            status={correctionStatus}
+            errorMessage={correctionError}
+            observations={observations}
+            checked={checkedObservations}
+            labelFor={(o) => (o.repeat_path ? o.repeat_path.replace(/\[(\d+)\]/g, (_, i) => ` ${Number(i) + 1} ·`).replace(/\./g, ' ') : o.field_name ?? 'Observación general')}
+            onToggle={(id) => setCheckedObservations((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; })}
+            onGoTo={(o) => {
+              const target = (o.repeat_path ?? o.field_name ?? '').split('[')[0].split('.')[0];
+              const index = pages.findIndex((pg) => pg.sections.some((sec) => (sec.id ?? sec.title) === target
+                || sec.rows.some((row) => row.columns.some((col) => col.components.some((cmp) => cmp.id === target)))));
+              if (index >= 0) setCurrentPage(index);
+            }}
+            onUseServerVersion={() => {
+              Alert.alert('Usar la versión del servidor', 'Se descartan sus cambios y se baja de nuevo el registro.', [
+                { text: 'Cancelar', style: 'cancel' },
+                { text: 'Descartar', style: 'destructive', onPress: () => {
+                  // Se retira la copia local; el próximo ciclo baja la versión vigente.
+                  discardCorrection(recordLocalId);
+                  void requestSync();
+                  navigation.goBack();
+                } },
+              ]);
+            }}
+          />
+        ) : null}
         {currentSections.map((section, sIdx) => {
           if (section.repeatable) {
             const sectionId = section.id ?? section.title;

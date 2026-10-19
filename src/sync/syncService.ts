@@ -37,6 +37,7 @@ import type { BulkSavePayload, RecordValue } from '../types';
 import { toBackendValues, type FileValue } from './backendValues';
 import { fileFingerprint } from '../evidence/evidenceFiles';
 import { extensionOf } from '../evidence/fileValues';
+import { pullCorrections, pushCorrections } from '../corrections/correctionSync';
 
 export { nestRepeatValues } from './backendValues';
 
@@ -73,6 +74,24 @@ SecureStore.getItemAsync(LAST_SYNC_KEY).then((v) => { lastSuccessfulSyncAt = las
 function noteSyncedUpToDate(): void {
   lastSuccessfulSyncAt = new Date().toISOString();
   SecureStore.setItemAsync(LAST_SYNC_KEY, lastSuccessfulSyncAt).catch(() => {});
+}
+
+// ── Correcciones de registros devueltos (docs/141) ──────────────────
+
+const CORRECTIONS_INTERVAL = 2 * 60_000;
+let lastCorrectionsSync = 0;
+
+/** Envía las correcciones hechas y baja las asignadas (diferencial). */
+export async function syncCorrections(): Promise<void> {
+  const projectId = useAuthStore.getState().activeProjectId;
+  if (!projectId) return;
+  lastCorrectionsSync = Date.now();
+  try {
+    await pushCorrections();
+    await pullCorrections(projectId);
+  } catch {
+    // Sin red o servidor caído: se reintenta en el próximo ciclo.
+  }
 }
 
 export function getLastSuccessfulSyncAt(): string | null {
@@ -138,6 +157,8 @@ async function tick(): Promise<void> {
   const pending = getPendingCount();
   if (pending === 0) {
     noteSyncedUpToDate();
+    // Sin capturas pendientes igual se revisan las devoluciones asignadas.
+    if (Date.now() - lastCorrectionsSync > CORRECTIONS_INTERVAL) await syncCorrections();
     setStatus('idle');
     scheduleNext(currentInterval);
     return;
@@ -266,6 +287,9 @@ export async function syncNow(): Promise<boolean> {
 
     // 4. Evidencias adjuntas: se suben ya vinculadas al registro del servidor
     await uploadAttachedEvidence();
+
+    // 4b. Correcciones de registros devueltos
+    await syncCorrections();
 
     // 5. Limpieza automatica de sincronizados antiguos (doc 107)
     try {
