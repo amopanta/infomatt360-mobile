@@ -21,14 +21,19 @@ Aplicación móvil de **InfoMatt360** — plataforma de operaciones territoriale
 
 ```
 src/
+├── actas/        # Generación de actas
 ├── api/          # Cliente HTTP (axios) y endpoints de sync
 ├── auth/         # Login, MFA, selección de proyecto, PIN, perfil
+├── cases/        # Base local de casos sin conexión (H08, aún sin conectar)
 ├── config/       # Configuración de entorno (API URL)
-├── db/           # SQLite: esquema, migraciones, operaciones CRUD
+├── corrections/  # Registros devueltos: observaciones y sync diferencial (docs/141 §4–§7)
+├── db/           # SQLite por usuario: esquema, migraciones, operaciones CRUD
 ├── evidence/     # Captura y visualización de evidencias multimedia
 ├── forms/        # Formularios dinámicos, campos, validación
 ├── map/          # Mapa de registros con react-native-maps
+├── monitoring/   # Estado del equipo, recorrido GPS y borrado remoto
 ├── navigation/   # AppNavigator con tabs y stacks anidados
+├── participants/ # Ficha y respuestas previas del participante (solo lectura)
 ├── scanner/      # Escáner de documentos con cámara
 ├── screens/      # Pantallas auxiliares (stats, crash logs)
 ├── store/        # Stores Zustand (auth, pin)
@@ -47,7 +52,7 @@ Login → MFA (opcional) → PIN Setup/Unlock → Selección de proyecto → Tab
 ### Tabs principales
 
 1. **Formularios** — Lista de formularios publicados, captura de datos, detalle de registros
-2. **Borradores** — Registros guardados como borrador, edición antes de enviar
+2. **Borradores** — Borradores (retoman la página donde quedaron) y filtro **Correcciones** con los registros devueltos
 3. **Mapa** — Visualización geográfica de registros capturados
 4. **Sync** — Estado de sincronización, resolución de conflictos, exportación
 5. **Perfil** — Información del usuario, configuración, PIN, estadísticas, logs de errores
@@ -56,11 +61,12 @@ Login → MFA (opcional) → PIN Setup/Unlock → Selección de proyecto → Tab
 
 La aplicación opera sin conexión a internet:
 
-- **Formularios** se cachean en SQLite al sincronizar
-- **Registros** se guardan localmente y se sincronizan cuando hay red
-- **Evidencias** (fotos, videos, huellas, firmas) se almacenan como archivos locales
-- **Sincronización** usa bulk-save con claves de idempotencia SHA-256 para evitar duplicados
-- **Conflictos** se detectan y permiten resolución manual (local vs servidor vs merge)
+- **Una base SQLite por usuario** (`infomatt360_u_<id>.db`): dos gestores en la misma tablet no ven datos ajenos. No se cifra (decisión del proyecto); `allowBackup:false` evita copiarla por respaldo de Android.
+- **Paquete del proyecto**: formularios, participantes, asignaciones y respuestas previas (máx. 300) se bajan con conexión; después se pueden **iniciar capturas nuevas sin red**.
+- **Registros** se guardan localmente (autoguardado del borrador con su página) y se envían al reconectar con una clave de idempotencia SHA-256 por lote; cada archivo lleva su `client_ref`, así un reintento no duplica registros ni evidencias.
+- **Evidencias** (fotos, videos, huellas, firmas) se almacenan como archivos locales y se suben antes o después del registro según su tipo.
+- **Correcciones**: cada 2 minutos se consultan los registros devueltos al usuario. Si la tablet ya tiene la versión, solo bajan las observaciones; si no, baja el paquete completo y solo los adjuntos que faltan. Se envían solo los campos cambiados con `expected_lock_version`; un 409 deja el registro "en conflicto" sin perder los cambios.
+- **Monitoreo**: latido del equipo, recorrido GPS durante la jornada y borrado remoto confirmado al servidor.
 
 ## Captura de huella digital (doc 134)
 
@@ -116,6 +122,9 @@ npx expo start
 # Verificar tipos
 npx tsc --noEmit
 
+# Pruebas (vitest, SQLite simulado con node:sqlite)
+npm test
+
 # Lint
 npx expo lint
 ```
@@ -128,24 +137,18 @@ Configurar en `src/config/env.ts`:
 export const API_BASE_URL = 'https://tu-servidor.com/api/v1';
 ```
 
-## Relación con el backend
-
-La app se conecta al backend InfoMatt360 (FastAPI + PostgreSQL + PostGIS):
-
-- `POST /auth/login` — Login con device_fingerprint opcional
-- `POST /auth/mfa/verify` — Verificación MFA
-- `GET /auth/session` — Datos del usuario y proyectos
-- `GET /runtime/templates` — Plantillas de formularios
-- `POST /runtime/session/bulk-save` — Guardado masivo de registros
-- `POST /files/upload` — Subida de evidencias (multipart)
-
 ## Documentación relacionada
 
-- [Captura de huella del participante](../amopanta/infomatt360/docs/134_CAPTURA_HUELLA_PARTICIPANTE.md)
-- [Asset lock y sesión extendida](../amopanta/infomatt360/docs/91_ASSET_LOCK_Y_SESION_EXTENDIDA_CAMPO.md)
-- [Sistema de diseño](../amopanta/infomatt360/docs/123_SISTEMA_DE_DISENO.md)
+Repositorio principal `amopanta/infomatt360`, carpeta `docs/`:
 
-## Contrato con el backend (actualizado 2026-10-17)
+- [140 — UX y cliente móvil único](https://github.com/amopanta/infomatt360/blob/main/docs/140_REESTRUCTURACION_UX_Y_CLIENTE_MOVIL_UNICO.md)
+- [141 — Funcionalidades oficiales](https://github.com/amopanta/infomatt360/blob/main/docs/141_FUNCIONALIDADES_ADICIONADAS_Y_PLAN_DE_IMPLEMENTACION.md) y [142 — su validación](https://github.com/amopanta/infomatt360/blob/main/docs/142_VALIDACION_FUNCIONALIDADES_DOCS141.md)
+- [134 — Captura de huella del participante](https://github.com/amopanta/infomatt360/blob/main/docs/134_CAPTURA_HUELLA_PARTICIPANTE.md)
+- [91 — Asset lock y sesión extendida](https://github.com/amopanta/infomatt360/blob/main/docs/91_ASSET_LOCK_Y_SESION_EXTENDIDA_CAMPO.md)
+- [123 — Sistema de diseño](https://github.com/amopanta/infomatt360/blob/main/docs/123_SISTEMA_DE_DISENO.md)
+- Arquitectura de esta app: [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md)
+
+## Contrato con el backend (actualizado 2026-10-18)
 
 Esta es la **app móvil oficial** de InfoMatt360. El antiguo módulo `mobile/` del repositorio principal (Express + Capacitor) se retiró porque usaba su propia base de datos.
 
@@ -156,6 +159,10 @@ Esta es la **app móvil oficial** de InfoMatt360. El antiguo módulo `mobile/` d
 | Formularios | `GET /builder/templates/{project_id}` (solo `published`) + `GET /runtime/template/{id}` |
 | Participantes | `GET /participants/project/{project_id}`, `GET /participants/{id}`, `GET /participants/{id}/activities` |
 | Sincronización | `POST /runtime/session/bulk-save` — cada registro lleva `project_id`, `template_id` y `values: [{field_name, field_value_json}]` (JSON en texto) |
+| Asignaciones y paquete | `GET /form-assignments/mine/{project_id}`, `GET /runtime/offline-manifest/{project_id}` |
+| Respuestas previas | `GET /participants/{id}/history` + `GET /runtime/record/{id}` (solo lectura) |
+| Correcciones | `GET /review/my-corrections/{project_id}`, `GET /review/records/{id}/correction-package`, `GET /review/records/{id}/observations`, `PATCH /runtime/record/{id}/correction`, `PATCH /review/observations/{id}`, `POST /review/actions` (reenviar) |
+| Equipo | `POST /field-devices/heartbeat`, `POST /field-devices/wipe-ack` |
 | Evidencias | `POST /files/upload` (multipart: `upload`, `project_id`, `asset_type`, `record_id` opcional). Orden: fotos de campo y firmas → registro → adjuntos con el `record_id` del servidor. Los campos de archivo se envían como `{file_asset_id, name, mime_type, size_bytes}` |
 
 Los identificadores son UUID (texto). Al actualizar, la app recrea una vez las tablas de caché local (`form_templates`, `participants`) sin tocar la cola de capturas pendientes. Detalle en `docs/140_REESTRUCTURACION_UX_Y_CLIENTE_MOVIL_UNICO.md` del repositorio principal.
