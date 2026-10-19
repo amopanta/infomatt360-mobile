@@ -63,4 +63,12 @@ describe('paquete de formularios en el teléfono (SQL real)', () => {
     expect(db.getFormVersion('a')?.version_hash).toBe('h1');
     expect(db.getCachedForm('b')).toBeNull();
   });
+
+  it('el borrador recuerda la página donde quedó (docs/141 §2)', () => {
+    db.applyFormPackage('p1', [form('a', 'h1')], ['a']);
+    db.saveAutoDraft({ localId: 'd-page', projectId: 'p1', templateId: 'a', data: [], page: 3 });
+    expect((db.getQueuedRecord('d-page') as { draft_page?: number }).draft_page).toBe(3);
+    db.saveAutoDraft({ localId: 'd-page', projectId: 'p1', templateId: 'a', data: [], page: 5 });
+    expect((db.getQueuedRecord('d-page') as { draft_page?: number }).draft_page).toBe(5);
+  });
 });

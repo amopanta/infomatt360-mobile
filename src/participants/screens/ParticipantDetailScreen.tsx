@@ -31,6 +31,7 @@ import {
   getParticipantFormStatus,
 } from '../../db/database';
 import { checkCapture, type CaptureCheck } from '../assignmentRules';
+import PreviousAnswers from '../PreviousAnswers';
 import { useAuthStore } from '../../store/authStore';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
@@ -258,6 +259,7 @@ export default function ParticipantDetailScreen() {
         keyExtractor={(f) => String(f.template_id)}
         renderItem={renderFormItem}
         contentContainerStyle={styles.list}
+        ListFooterComponent={<PreviousAnswers participantId={participantId} />}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}

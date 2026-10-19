@@ -263,6 +263,8 @@ function initializeDatabase(database: SQLite.SQLiteDatabase): void {
     // Correcciones de registros devueltos (docs/141): versión y observaciones
     `ALTER TABLE queued_records ADD COLUMN lock_version INTEGER`,
     `ALTER TABLE queued_records ADD COLUMN observations_json TEXT`,
+    // Página donde quedó el borrador (docs/141 §2)
+    `ALTER TABLE queued_records ADD COLUMN draft_page INTEGER`,
   ]) {
     try { database.execSync(`${ddl};`); } catch { /* columna ya existe */ }
   }
@@ -541,6 +543,8 @@ export function saveAutoDraft(params: {
   participantId?: string | null;
   data: unknown[];
   gps?: { lat: number; lng: number; accuracy: number } | null;
+  /** Página donde quedó (se retoma ahí) */
+  page?: number;
 }): void {
   const db = getDatabase();
   const existing = db.getFirstSync(
@@ -549,14 +553,14 @@ export function saveAutoDraft(params: {
   );
   if (existing) {
     db.runSync(
-      `UPDATE queued_records SET data_json = ?, gps_json = ? WHERE local_id = ?`,
-      [JSON.stringify(params.data), params.gps ? JSON.stringify(params.gps) : null, params.localId],
+      `UPDATE queued_records SET data_json = ?, gps_json = ?, draft_page = ? WHERE local_id = ?`,
+      [JSON.stringify(params.data), params.gps ? JSON.stringify(params.gps) : null, params.page ?? 0, params.localId],
     );
   } else {
     db.runSync(
       `INSERT INTO queued_records
-         (local_id, project_id, template_id, participant_id, status, data_json, evidence_paths_json, gps_json, template_version)
-       VALUES (?, ?, ?, ?, 'draft', ?, '[]', ?, ?)`,
+         (local_id, project_id, template_id, participant_id, status, data_json, evidence_paths_json, gps_json, template_version, draft_page)
+       VALUES (?, ?, ?, ?, 'draft', ?, '[]', ?, ?, ?)`,
       [
         params.localId,
         params.projectId,
@@ -565,6 +569,7 @@ export function saveAutoDraft(params: {
         JSON.stringify(params.data),
         params.gps ? JSON.stringify(params.gps) : null,
         getFormVersion(params.templateId)?.version_hash ?? null,
+        params.page ?? 0,
       ],
     );
   }

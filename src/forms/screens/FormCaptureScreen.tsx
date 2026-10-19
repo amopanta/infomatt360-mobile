@@ -147,11 +147,11 @@ export default function FormCaptureScreen() {
   // guardado al salir que veía los valores vacíos del primer instante.
   // Ahora: 1,5 s después de cada cambio, al pasar a segundo plano y al salir,
   // siempre con los valores más recientes.
-  const latestDraft = useRef({ values, gps });
-  latestDraft.current = { values, gps };
+  const latestDraft = useRef({ values, gps, currentPage });
+  latestDraft.current = { values, gps, currentPage };
   const persistDraft = useCallback(() => {
     if (submittedRef.current || !activeProjectId || !formId) return;
-    const { values: current, gps: currentGps } = latestDraft.current;
+    const { values: current, gps: currentGps, currentPage: page } = latestDraft.current;
     if (Object.keys(current).length === 0) return;
     try {
       saveAutoDraft({
@@ -161,6 +161,7 @@ export default function FormCaptureScreen() {
         participantId,
         data: Object.entries(current).map(([fieldId, val]) => ({ field_id: fieldId, field_name: fieldId, field_value_json: val })),
         gps: currentGps ? { lat: currentGps.lat, lng: currentGps.lng, accuracy: currentGps.accuracy } : null,
+        page,
       });
     } catch {
       // Sin espacio u otro error de la base: se reintenta en el próximo cambio.
@@ -170,7 +171,7 @@ export default function FormCaptureScreen() {
   useEffect(() => {
     const timer = setTimeout(persistDraft, 1500);
     return () => clearTimeout(timer);
-  }, [values, gps, persistDraft]);
+  }, [values, gps, currentPage, persistDraft]);
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {

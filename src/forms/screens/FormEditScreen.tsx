@@ -144,6 +144,10 @@ export default function FormEditScreen() {
       setRepeatCounts(counts);
     }
 
+    // Retomar en la página donde quedó el borrador (docs/141 §2)
+    const savedPage = Number((record as { draft_page?: number | null }).draft_page ?? 0);
+    if (savedPage > 0 && savedPage < parsedPages.length) setCurrentPage(savedPage);
+
     // Restaurar GPS
     if (record.gps_json) {
       setGps(JSON.parse(record.gps_json));

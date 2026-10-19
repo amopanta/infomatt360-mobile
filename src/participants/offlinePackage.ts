@@ -8,6 +8,7 @@
 import api from '../api/client';
 import { getProjectParticipants } from '../api/participantsApi';
 import { replaceProjectSnapshot, type CachedAssignment } from '../db/database';
+import { downloadParticipantHistory } from './historyCache';
 
 type MyAssignment = {
   template_id: string;
@@ -47,5 +48,7 @@ export async function downloadProjectPackage(projectId: string): Promise<{ parti
     createdAt: p.created_at,
     updatedAt: p.updated_at,
   })), rows);
+  // Respuestas previas de los participantes asignados, en solo lectura (docs/141 §3)
+  await downloadParticipantHistory(projectId, [...new Set(rows.map((r) => r.participant_id))]).catch(() => 0);
   return { participants: items.length, assignments: rows.length };
 }
