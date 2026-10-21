@@ -2,66 +2,35 @@
 
 ## Modelo de datos local (SQLite)
 
-### Tablas
+Actualizado: 2026-10-18 (esquema real en `src/db/database.ts` y en los módulos indicados).
 
-#### `form_templates`
-Cache local de plantillas de formularios descargadas del backend.
+**Una base por usuario:** `infomatt360_u_<id>.db`. La base antigua
+`infomatt360.db` la reclama el primer usuario que inicia sesión tras la
+actualización. Al cambiar de usuario se abre su propia base; ningún gestor ve
+capturas, participantes ni correcciones de otro en la misma tablet. La base
+**no se cifra** (decisión del proyecto); `allowBackup:false` en `app.json`
+impide copiarla con el respaldo de Android y el borrado remoto la elimina.
 
-| Columna | Tipo | Descripción |
+Los identificadores del servidor son UUID en texto.
+
+| Tabla | Módulo | Contenido |
 |---|---|---|
-| id | INTEGER PK | ID del template en el backend |
-| template_id | TEXT | UUID del template |
-| version | INTEGER | Versión del esquema |
-| name | TEXT | Nombre del formulario |
-| project_id | INTEGER | Proyecto al que pertenece |
-| schema_json | TEXT | JSON Schema completo (páginas, secciones, campos) |
-| updated_at | TEXT | Última actualización |
+| `form_templates` | db | Plantillas publicadas: `schema_json`, `version`, `version_hash`, `access_mode`, `retired` |
+| `queued_records` | db | Capturas, borradores y correcciones (ver estados abajo). Columnas: `data_json`, `evidence_paths_json`, `gps_json`, `server_record_id`, `server_data_json`, `lock_version`, `observations_json`, `draft_page`, `template_version` |
+| `evidence` | db | Archivos locales (`photo`, `video`, `audio`, `document`, `signature`, `fingerprint`), `uploaded`, `remote_url` |
+| `participants` | db | Participantes del paquete del proyecto |
+| `form_assignments_cache` | db | Asignaciones formulario ↔ participante con su estado |
+| `offline_packages` | db | Fecha y tamaño del último paquete por proyecto |
+| `route_points` | db | Recorrido GPS de la jornada pendiente de enviar |
+| `crash_logs` | db | Errores capturados para diagnóstico |
+| `participant_history_cache` | participants/historyCache | Respuestas previas en solo lectura (máx. 300 por proyecto) |
+| `app_settings` | store/settingsStore | Preferencias locales |
+| `cases_cache`, `case_events_cache`, `case_outbox` | cases/caseStore | Casos sin conexión (H08). **Base creada, aún sin conectar a pantallas ni al servidor** |
 
-#### `queued_records`
-Cola offline de registros capturados pendientes de sincronización.
+### Estados de `queued_records`
 
-| Columna | Tipo | Descripción |
-|---|---|---|
-| local_id | TEXT PK | UUID v4 generado localmente |
-| project_id | INTEGER | Proyecto |
-| template_id | INTEGER | Formulario usado |
-| participant_id | INTEGER | Participante (opcional) |
-| status | TEXT | `pending` → `syncing` → `synced` / `error` / `conflict` |
-| data_json | TEXT | Valores capturados como JSON (`RecordValue[]`) |
-| evidence_paths_json | TEXT | Array JSON de rutas locales de archivos |
-| gps_json | TEXT | `{lat, lng, accuracy}` |
-| error_message | TEXT | Mensaje si status = error |
-| created_at | TEXT | Timestamp de creación |
-| synced_at | TEXT | Timestamp de sincronización exitosa |
-
-#### `evidence`
-Archivos de evidencia (fotos, videos, huellas, firmas, documentos).
-
-| Columna | Tipo | Descripción |
-|---|---|---|
-| local_id | TEXT PK | UUID v4 |
-| record_local_id | TEXT FK | Registro al que pertenece |
-| type | TEXT | `photo`, `video`, `audio`, `document`, `signature`, `fingerprint` |
-| file_uri | TEXT | Ruta local del archivo en el dispositivo |
-| remote_url | TEXT | URL en el backend después de subir |
-| mime_type | TEXT | Tipo MIME del archivo |
-| file_size | INTEGER | Tamaño en bytes |
-| gps_json | TEXT | Geolocalización de la captura |
-| uploaded | INTEGER | 0 = pendiente, 1 = subido |
-| created_at | TEXT | Timestamp |
-
-#### `crash_logs`
-Registro de errores capturados para diagnóstico.
-
-| Columna | Tipo | Descripción |
-|---|---|---|
-| id | INTEGER PK | Autoincrement |
-| severity | TEXT | `error`, `warning`, `info` |
-| message | TEXT | Mensaje del error |
-| stack | TEXT | Stack trace |
-| context_json | TEXT | Contexto adicional |
-| screen | TEXT | Pantalla donde ocurrió |
-| created_at | TEXT | Timestamp |
+- Captura propia: `draft` → `pending` → `syncing` → `synced`, o `error` / `conflict`.
+- Registro devuelto (docs/141 §4–§7): `returned` (editable solo por su destinatario) → `correction_pending` (corregido, por enviar) → `synced`. Si el servidor responde 409 queda `correction_conflict` con los cambios conservados; si la corrección ya no le corresponde, `correction_error`.
 
 ## Flujo de sincronización
 
@@ -100,6 +69,16 @@ Registro de errores capturados para diagnóstico.
 ### Idempotencia
 
 Cada lote de registros genera una clave SHA-256 a partir de los `local_id` ordenados. Si el backend ya procesó esa clave, retorna `replayed` sin duplicar datos.
+
+### Correcciones (registros devueltos)
+
+`syncService` llama a `syncCorrections` cada 2 minutos, aunque no haya capturas
+pendientes (`src/corrections/correctionSync.ts`):
+
+1. `GET /review/my-corrections/{project_id}` lista los devueltos al usuario con su `lock_version`.
+2. Si la tablet tiene la misma versión, solo baja las observaciones (`/review/records/{id}/observations`). Si no, `GET /review/records/{id}/correction-package` trae respuestas, integrantes REPEAT y el manifiesto de adjuntos; solo se descargan los que faltan.
+3. El gestor corrige (banner con "Ir a la pregunta" y "Ya la corregí") y reenvía: se suben los archivos nuevos, `PATCH /runtime/record/{id}/correction` con **solo los campos cambiados** y `expected_lock_version`, `PATCH /review/observations/{id}` y `POST /review/actions`.
+4. Un 409 marca `correction_conflict` sin sobrescribir; un registro que dejó de estar asignado se retira de la lista.
 
 ### Conflictos
 

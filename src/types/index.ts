@@ -30,17 +30,17 @@ export interface AuthTokens {
 }
 
 export interface ProjectAssignment {
-  id: number;
+  id: string;
   name: string;
-  role_id: number;
+  role_id: string;
   permissions: string[];
 }
 
 export interface UserSession {
-  user_id: number;
+  user_id: string;
   email: string;
   full_name: string;
-  organization_id: number;
+  organization_id: string;
   organization_name: string;
   projects: ProjectAssignment[];
   mfa_enabled: boolean;
@@ -70,6 +70,9 @@ export interface FormComponent {
   validations?: Record<string, unknown>;
   config?: Record<string, unknown>;
   conditionalVisibility?: ConditionalVisibility;
+  /** Solo en type 'repeat': campos de un grupo repetible anidado dentro de
+   * la fila de otro grupo (repeat dentro de repeat en XLSForm). */
+  children?: FormComponent[];
 }
 
 export interface FormColumn {
@@ -98,14 +101,18 @@ export interface FormPage {
 }
 
 export interface FormTemplate {
-  id: number;
+  id: string;
   templateId: string;
   version: number;
   name: string;
   description?: string;
-  project_id: number;
+  project_id: string;
   pages: FormPage[];
   published: boolean;
+  /** legacy | open | closed: reglas de asignación (ver assignmentRules) */
+  accessMode?: string;
+  /** Huella de la versión en el servidor (H01) */
+  versionHash?: string;
   created_at: string;
   updated_at: string;
 }
@@ -127,13 +134,13 @@ export interface RecordValue {
 }
 
 export interface RuntimeRecord {
-  id?: number;
-  template_id: number;
-  project_id: number;
-  participant_id?: number;
+  id?: string;
+  template_id: string;
+  project_id: string;
+  participant_id?: string;
   status: RecordStatus;
   values: RecordValue[];
-  submitted_by?: number;
+  submitted_by?: string;
   created_at: string;
   updated_at?: string;
 }
@@ -144,9 +151,9 @@ export type QueueStatus = 'pending' | 'syncing' | 'synced' | 'error' | 'conflict
 
 export interface QueuedRecord {
   local_id: string;        // UUID v4 generado localmente
-  project_id: number;
-  template_id: number;
-  participant_id?: number;
+  project_id: string;
+  template_id: string;
+  participant_id?: string;
   status: QueueStatus;
   data: RecordValue[];     // valores capturados
   evidence_paths: string[]; // rutas locales de fotos/videos
@@ -175,25 +182,30 @@ export interface Evidence {
 
 // ─── Sync ────────────────────────────────────────────────────────────
 
+/** Contrato de POST /runtime/session/bulk-save (backend schemas/runtime_record.py) */
 export interface BulkSavePayload {
-  project_id: number;
-  template_id: number;
+  project_id: string;
+  template_id: string;
   idempotency_key: string;
   records: {
-    participant_id?: number;
+    project_id: string;
+    template_id: string;
+    participant_id?: string | null;
     status: RecordStatus;
-    values: RecordValue[];
+    /** field_value_json va serializado como texto JSON */
+    values: { field_name: string; field_value_json: string }[];
   }[];
 }
 
 export interface BulkSaveResult {
-  attempted: number;
-  synced: number;
+  received: number;
+  created: number;
   failed: number;
+  replayed?: boolean;
   results: {
     index: number;
-    status: 'created' | 'error' | 'replayed' | 'conflict';
-    record_id?: number;
+    id?: string;
+    status: 'created' | 'failed' | 'queued' | 'conflict';
     error?: string;
     server_values?: RecordValue[]; // datos del servidor cuando hay conflicto
     server_updated_at?: string;    // timestamp del servidor
@@ -204,12 +216,12 @@ export interface BulkSaveResult {
 
 export interface ConflictRecord {
   local_id: string;
-  project_id: number;
-  template_id: number;
-  participant_id: number | null;
+  project_id: string;
+  template_id: string;
+  participant_id: string | null;
   local_data: RecordValue[];
   server_data: RecordValue[];
-  server_record_id: number | null;
+  server_record_id: string | null;
   server_updated_at: string | null;
   created_at: string;
   detected_at: string;
@@ -218,8 +230,8 @@ export interface ConflictRecord {
 // ─── Participantes (Vista 360) ──────────────────────────────────────
 
 export interface Participant {
-  id: number;
-  project_id: number;
+  id: string;
+  project_id: string;
   full_name: string;
   document_type: string;       // CC, TI, CE, etc.
   document_number: string;     // Numero de cedula/documento
@@ -234,8 +246,8 @@ export interface Participant {
 
 /** Relacion participante ↔ formulario con estado de aplicacion */
 export interface ParticipantForm {
-  participant_id: number;
-  template_id: number;
+  participant_id: string;
+  template_id: string;
   form_name: string;
   /** Si ya existe un registro para este participante+formulario */
   applied: boolean;

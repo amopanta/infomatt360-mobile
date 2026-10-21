@@ -34,12 +34,12 @@ import { colors, spacing, fontSize, borderRadius } from '../ui/theme';
 
 interface ConflictItem {
   local_id: string;
-  project_id: number;
-  template_id: number;
-  participant_id: number | null;
+  project_id: string;
+  template_id: string;
+  participant_id: string | null;
   data_json: string;
   server_data_json: string | null;
-  server_record_id: number | null;
+  server_record_id: string | null;
   server_updated_at: string | null;
   created_at: string;
   updated_at: string;
@@ -104,15 +104,15 @@ function formatValue(val: unknown): string {
 export default function ConflictResolutionScreen() {
   const [conflicts, setConflicts] = useState<ConflictItem[]>([]);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [templateNames, setTemplateNames] = useState<Record<number, string>>({});
+  const [templateNames, setTemplateNames] = useState<Record<string, string>>({});
 
   const refresh = useCallback(() => {
     const items = listConflictRecords() as ConflictItem[];
     setConflicts(items);
 
     // Cargar nombres de templates
-    const names: Record<number, string> = {};
-    const seenTemplates = new Set<number>();
+    const names: Record<string, string> = {};
+    const seenTemplates = new Set<string>();
     for (const item of items) {
       if (!seenTemplates.has(item.template_id)) {
         seenTemplates.add(item.template_id);

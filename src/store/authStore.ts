@@ -8,18 +8,19 @@
 import { create } from 'zustand';
 import * as SecureStore from 'expo-secure-store';
 import type { ProjectAssignment, UserSession } from '../types';
+import { activateUserFromToken, deactivateUser, hydrateOwnership, noteOnlineAuth, offlineSessionValid } from '../auth/sessionOwner';
 
 interface AuthState {
   accessToken: string | null;
   refreshToken: string | null;
   session: UserSession | null;
-  activeProjectId: number | null;
+  activeProjectId: string | null;
   activePermissions: string[];
 
   // Acciones
   setTokens: (access: string, refresh: string) => void;
   setSession: (session: UserSession) => void;
-  selectProject: (projectId: number) => void;
+  selectProject: (projectId: string) => void;
   logout: () => void;
   hydrate: () => Promise<void>;
 }
@@ -32,6 +33,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   activePermissions: [],
 
   setTokens: (access, refresh) => {
+    // Antes de publicar el token (que abre las pantallas) se activa la base
+    // del usuario: nadie ve ni envía datos de otra persona (H07).
+    activateUserFromToken(access);
+    noteOnlineAuth();
     set({ accessToken: access, refreshToken: refresh });
     // Persistir en SecureStore (cifrado del OS)
     SecureStore.setItemAsync('access_token', access).catch(() => {});
@@ -57,6 +62,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   logout: () => {
+    deactivateUser();
     set({
       accessToken: null,
       refreshToken: null,
@@ -76,11 +82,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         SecureStore.getItemAsync('refresh_token'),
         SecureStore.getItemAsync('active_project_id'),
       ]);
-      if (access && refresh) {
+      await hydrateOwnership();
+      // Sesión sin validar en línea por demasiados días: se pide iniciar
+      // sesión de nuevo; los datos del usuario se conservan.
+      if (access && refresh && offlineSessionValid()) {
+        activateUserFromToken(access);
         set({
           accessToken: access,
           refreshToken: refresh,
-          activeProjectId: projId ? Number(projId) : null,
+          activeProjectId: projId || null,
         });
       }
     } catch {

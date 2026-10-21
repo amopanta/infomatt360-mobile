@@ -24,11 +24,13 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import * as FileSystem from 'expo-file-system/legacy';
-import { v4 as uuidv4 } from 'uuid';
+// uuid v14 necesita crypto.getRandomValues, que no existe en React Native.
+import { randomUUID as uuidv4 } from 'expo-crypto';
 import { useRoute, useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { insertEvidence, getRecordEvidence } from '../../db/database';
 import { compressImage, FIELD_CAMERA_OPTIONS, FIELD_GALLERY_OPTIONS } from '../../utils/imageCompressor';
+import { persistEvidenceFile } from '../evidenceFiles';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
@@ -93,16 +95,23 @@ export default function EvidenceCaptureScreen() {
     mimeType: string,
   ) => {
     const gps = await getCurrentGps();
-    const fileSize = await getFileSize(uri);
+    // Copia permanente: la cámara y el compresor dejan el archivo en caché.
+    let saved;
+    try {
+      saved = await persistEvidenceFile(uri, { type, mimeType });
+    } catch (error) {
+      Alert.alert('Evidencia', error instanceof Error ? error.message : 'No se pudo guardar el archivo.');
+      return;
+    }
     const localId = uuidv4();
 
     insertEvidence({
       localId,
       recordLocalId,
       type,
-      fileUri: uri,
-      mimeType,
-      fileSize,
+      fileUri: saved.uri,
+      mimeType: saved.mimeType ?? mimeType,
+      fileSize: saved.fileSize ?? (await getFileSize(saved.uri)),
       gps,
     });
 

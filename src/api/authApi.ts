@@ -17,12 +17,19 @@ import type {
 } from '../types';
 
 export async function login(payload: LoginRequest): Promise<AuthTokens & { mfa_required?: boolean; mfa_token?: string }> {
-  const { data } = await api.post('/auth/login', payload);
-  return data;
+  // El backend no recibe organization_slug y devuelve el reto MFA como
+  // mfa_challenge_token (backend/app/schemas/auth.py: LoginResponse).
+  const { email, password, device_fingerprint } = payload;
+  const { data } = await api.post('/auth/login', { email, password, device_fingerprint });
+  return { ...data, mfa_token: data.mfa_challenge_token ?? undefined };
 }
 
 export async function verifyMfa(payload: MfaVerifyRequest): Promise<AuthTokens> {
-  const { data } = await api.post('/auth/mfa/verify', payload);
+  const { data } = await api.post('/auth/mfa/verify', {
+    challenge_token: payload.mfa_token,
+    code: payload.totp_code,
+    device_fingerprint: payload.device_fingerprint,
+  });
   return data;
 }
 

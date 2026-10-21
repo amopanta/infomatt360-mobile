@@ -24,21 +24,28 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RouteProp } from '@react-navigation/native';
 import {
+  getCachedAssignment,
   getCachedParticipant,
+  getFormAccessMode,
+  getOfflinePackage,
   getParticipantFormStatus,
 } from '../../db/database';
+import { checkCapture, type CaptureCheck } from '../assignmentRules';
+import PreviousAnswers from '../PreviousAnswers';
 import { useAuthStore } from '../../store/authStore';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
-type RouteParams = { ParticipantDetail: { participantId: number } };
+type RouteParams = { ParticipantDetail: { participantId: string } };
 
 interface FormStatusItem {
-  template_id: number;
+  template_id: string;
   form_name: string;
   applied: boolean;
   applied_at: string | null;
   record_local_id: string | null;
   record_status: string | null;
+  /** Reglas de asignación aplicadas sin conexión (H02) */
+  check: CaptureCheck;
 }
 
 export default function ParticipantDetailScreen() {
@@ -48,7 +55,7 @@ export default function ParticipantDetailScreen() {
   const { activeProjectId } = useAuthStore();
 
   const [participant, setParticipant] = useState<{
-    id: number;
+    id: string;
     full_name: string;
     document_type: string;
     document_number: string;
@@ -65,13 +72,19 @@ export default function ParticipantDetailScreen() {
 
     if (activeProjectId) {
       const formStatuses = getParticipantFormStatus(participantId, activeProjectId);
-      // Convertir applied de 0/1 a boolean
-      setForms(
-        formStatuses.map((f) => ({
-          ...f,
-          applied: !!f.applied,
-        })),
-      );
+      const hasPackage = !!getOfflinePackage(activeProjectId);
+      const items: FormStatusItem[] = [];
+      for (const f of formStatuses) {
+        const accessMode = getFormAccessMode(f.template_id);
+        const assignment = getCachedAssignment(activeProjectId, f.template_id, participantId);
+        // Formularios con asignación que no son de este participante para
+        // este gestor no se muestran (no aplican a él).
+        if (accessMode !== 'legacy' && hasPackage && !assignment && !f.applied) continue;
+        const check = checkCapture({ accessMode, assignment, localRecordStatus: f.applied ? f.record_status : null, hasPackage });
+        // Convertir applied de 0/1 a boolean
+        items.push({ ...f, applied: !!f.applied, check });
+      }
+      setForms(items);
     }
   }, [participantId, activeProjectId]);
 
@@ -144,11 +157,14 @@ export default function ParticipantDetailScreen() {
           <View style={styles.statusRow}>
             <View style={[styles.statusBadge, styles.statusNotApplied]}>
               <Text style={styles.statusNotAppliedText}>
-                ○ No aplicado
+                {item.check.allowed ? `○ ${item.check.label}` : `● ${item.check.label}`}
               </Text>
             </View>
           </View>
         )}
+        {!item.applied && !item.check.allowed && item.check.reason ? (
+          <Text style={styles.appliedDate}>{item.check.reason}</Text>
+        ) : null}
       </View>
 
       {item.applied && item.record_local_id ? (
@@ -175,7 +191,7 @@ export default function ParticipantDetailScreen() {
             <Text style={styles.actaBtnText}>Acta</Text>
           </TouchableOpacity>
         </View>
-      ) : !item.applied ? (
+      ) : !item.applied && item.check.allowed ? (
         <TouchableOpacity
           style={styles.captureBtn}
           onPress={() =>
@@ -243,6 +259,7 @@ export default function ParticipantDetailScreen() {
         keyExtractor={(f) => String(f.template_id)}
         renderItem={renderFormItem}
         contentContainerStyle={styles.list}
+        ListFooterComponent={<PreviousAnswers participantId={participantId} />}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}

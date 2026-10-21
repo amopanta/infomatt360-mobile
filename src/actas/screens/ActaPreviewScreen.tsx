@@ -10,7 +10,7 @@
  *
  * Parámetros de ruta:
  *   - recordLocalId: string — ID local del registro
- *   - participantId: number — ID del participante
+ *   - participantId: string — ID del participante
  */
 
 import React, { useEffect, useState, useCallback } from 'react';
@@ -46,7 +46,7 @@ import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 type RouteParams = {
   ActaPreview: {
     recordLocalId: string;
-    participantId: number;
+    participantId: string;
   };
 };
 

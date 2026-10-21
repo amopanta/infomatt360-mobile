@@ -11,7 +11,7 @@
  */
 
 import { create } from 'zustand';
-import { getDatabase } from '../db/database';
+import { getDeviceDatabase as getDatabase } from '../db/database';
 import { ENV } from '../config/env';
 
 export interface AppSettings {

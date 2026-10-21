@@ -21,18 +21,29 @@ export async function bulkSaveRecords(
  * Sube un archivo de evidencia al storage del proyecto.
  */
 export async function uploadEvidence(
-  projectId: number,
+  projectId: string,
   fileUri: string,
   mimeType: string,
   fileName: string,
-): Promise<{ file_id: string; url: string }> {
+  assetType: string,
+  participantId?: string | null,
+  recordId?: string | null,
+  integrity?: { clientRef: string; md5?: string | null },
+): Promise<{ id: string; storage_path: string; size_bytes: number; original_name: string }> {
+  // Campos exigidos por backend/app/api/v1/files.py (upload_file_asset)
   const formData = new FormData();
-  formData.append('file', {
+  formData.append('upload', {
     uri: fileUri,
     type: mimeType,
     name: fileName,
   } as any);
-  formData.append('project_id', String(projectId));
+  formData.append('project_id', projectId);
+  formData.append('asset_type', assetType);
+  if (participantId) formData.append('participant_id', participantId);
+  if (recordId) formData.append('record_id', recordId);
+  // Reenvío sin duplicar y verificación de integridad en el servidor (H04/H06)
+  if (integrity?.clientRef) formData.append('client_ref', integrity.clientRef);
+  if (integrity?.md5) formData.append('client_md5', integrity.md5);
 
   const { data } = await api.post('/files/upload', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },

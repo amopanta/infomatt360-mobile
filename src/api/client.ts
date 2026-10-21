@@ -4,7 +4,6 @@
  * - Usa la URL del servidor configurada por el usuario (serverStore).
  * - Inyecta Authorization header con el access_token guardado.
  * - Maneja refresh automatico cuando el token expira (401).
- * - Envia X-Project-Id con el proyecto activo.
  */
 
 import axios, {
@@ -18,7 +17,9 @@ import { useServerStore } from '../store/serverStore';
 const api = axios.create({
   baseURL: ENV.API_BASE_URL,
   timeout: ENV.REQUEST_TIMEOUT,
-  headers: { 'Content-Type': 'application/json' },
+  // El backend solo entrega el refresh token en el cuerpo a clientes
+  // nativos (sin Origin); la web lo recibe en una cookie httponly.
+  headers: { 'Content-Type': 'application/json', 'X-Client-Platform': 'native' },
 });
 
 /**
@@ -32,7 +33,7 @@ export function updateApiBaseUrl(url: string): void {
 // ── Request interceptor: inyectar token y proyecto ───────────────────
 
 api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
-  const { accessToken, activeProjectId } = useAuthStore.getState();
+  const { accessToken } = useAuthStore.getState();
 
   // Usar siempre la URL mas reciente del serverStore
   const effectiveUrl = useServerStore.getState().getEffectiveUrl();
@@ -44,10 +45,6 @@ api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   if (accessToken) {
     config.headers.Authorization = `Bearer ${accessToken}`;
   }
-  if (activeProjectId) {
-    config.headers['X-Project-Id'] = String(activeProjectId);
-  }
-
   return config;
 });
 
@@ -93,9 +90,11 @@ async function performRefresh(): Promise<string> {
   if (!refreshToken) throw new Error('No refresh token');
 
   const baseUrl = useServerStore.getState().getEffectiveUrl();
-  const res = await axios.post(`${baseUrl}/auth/refresh`, {
-    refresh_token: refreshToken,
-  });
+  const res = await axios.post(
+    `${baseUrl}/auth/refresh`,
+    { refresh_token: refreshToken },
+    { headers: { 'X-Client-Platform': 'native' } },
+  );
 
   const { access_token, refresh_token } = res.data;
   useAuthStore.getState().setTokens(access_token, refresh_token);

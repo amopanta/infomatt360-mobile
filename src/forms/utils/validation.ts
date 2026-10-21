@@ -10,9 +10,9 @@
  * Retorna un mapa de { fieldId: mensajeError } para los campos invalidos.
  */
 
-import type { FormComponent, FormPage } from '../../types';
-import { isFieldVisible } from './conditionalVisibility';
-import { getRepeatFieldId } from '../components/RepeatGroupRenderer';
+import type { FormComponent, FormPage, FormSection } from '../../types';
+import { componentVisible, constraintError } from './formLogic';
+import { getRepeatFieldId, nestedSection } from './repeatKeys';
 
 export interface ValidationError {
   fieldId: string;
@@ -57,11 +57,11 @@ export function validateForm(
   // 1. Validar campos normales (no repetibles)
   const components = getAllComponents(pages);
   for (const comp of components) {
-    if (!isFieldVisible(comp.conditionalVisibility, values)) {
+    if (!componentVisible(comp, values)) {
       continue;
     }
     const val = values[comp.id];
-    const error = validateField(comp, val);
+    const error = validateField(comp, val) ?? constraintError(comp, val, values);
     if (error) {
       errors.set(comp.id, error);
     }
@@ -72,42 +72,7 @@ export function validateForm(
     for (const page of pages) {
       for (const section of page.sections) {
         if (!section.repeatable) continue;
-        const sectionId = section.id ?? section.title;
-        const count = repeatCounts[sectionId] ?? 1;
-        const sectionComponents = getSectionComponents(section);
-
-        // Validar minimo de repeticiones
-        const minReps = section.minRepetitions ?? 1;
-        if (count < minReps) {
-          // Agregar error generico al primer campo de la primera instancia
-          const firstComp = sectionComponents[0];
-          if (firstComp) {
-            const key = getRepeatFieldId(sectionId, 0, firstComp.id);
-            errors.set(key, `Se requieren al menos ${minReps} ${section.title.toLowerCase()}`);
-          }
-        }
-
-        for (let i = 0; i < count; i++) {
-          for (const comp of sectionComponents) {
-            const indexedId = getRepeatFieldId(sectionId, i, comp.id);
-            // Visibilidad condicional dentro de la instancia
-            if (comp.conditionalVisibility) {
-              const instanceValues: Record<string, unknown> = {};
-              for (const c of sectionComponents) {
-                const k = getRepeatFieldId(sectionId, i, c.id);
-                if (values[k] !== undefined) instanceValues[c.id] = values[k];
-              }
-              if (!isFieldVisible(comp.conditionalVisibility, { ...values, ...instanceValues })) {
-                continue;
-              }
-            }
-            const val = values[indexedId];
-            const error = validateField(comp, val);
-            if (error) {
-              errors.set(indexedId, error);
-            }
-          }
-        }
+        validateRepeatSection(section, values, repeatCounts, errors);
       }
     }
   }
@@ -115,11 +80,60 @@ export function validateForm(
   return errors;
 }
 
+/** Valida cada fila de un grupo repetible y, dentro de ella, sus grupos anidados. */
+function validateRepeatSection(
+  section: FormSection,
+  values: Record<string, unknown>,
+  repeatCounts: Record<string, number>,
+  errors: Map<string, string>,
+): void {
+  const sectionId = section.id ?? section.title;
+  const minReps = section.minRepetitions ?? 1;
+  const count = repeatCounts[sectionId] ?? minReps;
+  const sectionComponents = getSectionComponents(section);
+
+  // Validar minimo de repeticiones
+  if (count < minReps) {
+    // Agregar error generico al primer campo de la primera instancia
+    const firstComp = sectionComponents[0];
+    if (firstComp) {
+      const key = getRepeatFieldId(sectionId, 0, firstComp.id);
+      errors.set(key, `Se requieren al menos ${minReps} ${section.title.toLowerCase()}`);
+    }
+  }
+
+  for (let i = 0; i < count; i++) {
+    for (const comp of sectionComponents) {
+      const indexedId = getRepeatFieldId(sectionId, i, comp.id);
+      // Visibilidad condicional dentro de la instancia
+      const instanceValues: Record<string, unknown> = {};
+      for (const c of sectionComponents) {
+        const k = getRepeatFieldId(sectionId, i, c.id);
+        if (values[k] !== undefined) instanceValues[c.id] = values[k];
+      }
+      const rowContext = { ...values, ...instanceValues };
+      if (!componentVisible(comp, rowContext)) {
+        continue;
+      }
+      if (comp.type === 'repeat') {
+        validateRepeatSection(nestedSection(comp, indexedId), values, repeatCounts, errors);
+        continue;
+      }
+      const val = values[indexedId];
+      const error = validateField(comp, val) ?? constraintError(comp, val, rowContext);
+      if (error) {
+        errors.set(indexedId, error);
+      }
+    }
+  }
+}
+
 /** Valida un campo individual */
 export function validateField(
   comp: FormComponent,
   value: unknown,
 ): string | null {
+  if (comp.type === 'calculate' || comp.type === 'hidden') return null;
   const v = comp.validations ?? {};
 
   // Required
@@ -139,6 +153,12 @@ export function validateField(
   }
   if (Array.isArray(value) && value.length === 0) {
     return null;
+  }
+
+  // Campo numérico con texto que no es un número ('1,', 'abc', NaN): antes
+  // pasaba la validación y se enviaba vacío sin avisar.
+  if (comp.type === 'number' && (typeof value === 'string' || (typeof value === 'number' && !Number.isFinite(value)))) {
+    return 'Ingrese un número válido';
   }
 
   // Validaciones de texto

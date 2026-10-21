@@ -38,10 +38,16 @@ import SyncStatusScreen from '../sync/SyncStatusScreen';
 import ConflictResolutionScreen from '../sync/ConflictResolutionScreen';
 import ExportScreen from '../sync/ExportScreen';
 import OfflineBanner from '../ui/OfflineBanner';
+import RouteNotice from '../monitoring/RouteNotice';
+import { setWipeHandler, startDeviceMonitor, stopDeviceMonitor } from '../monitoring/deviceMonitor';
+import { runRemoteWipe } from '../auth/localWipe';
+
+setWipeHandler(runRemoteWipe);
 import { useAuthStore } from '../store/authStore';
 import { useServerStore } from '../store/serverStore';
+import { useBrandingStore } from '../store/brandingStore';
 import { getPendingCount } from '../db/database';
-import { onSyncStatusChange } from '../sync/syncService';
+import { onSyncStatusChange, startAutoSync } from '../sync/syncService';
 import { colors, fontSize } from '../ui/theme';
 
 const Stack = createNativeStackNavigator();
@@ -458,12 +464,46 @@ export default function AppNavigator() {
   const { accessToken, session, activeProjectId, hydrate } = useAuthStore();
   const { pinEnabled, unlocked, hydrate: hydratePin } = usePinStore();
   const { hydrate: hydrateServer } = useServerStore();
+  const hydrateBranding = useBrandingStore((s) => s.hydrate);
+  const refreshBranding = useBrandingStore((s) => s.refresh);
   const [loading, setLoading] = useState(true);
   const [showPinSetup, setShowPinSetup] = useState(false);
 
   useEffect(() => {
-    Promise.all([hydrate(), hydratePin(), hydrateServer()]).finally(() => setLoading(false));
-  }, [hydrate, hydratePin, hydrateServer]);
+    Promise.all([hydrate(), hydratePin(), hydrateServer(), hydrateBranding()]).finally(() => {
+      setLoading(false);
+      // Marca guardada al instante; luego se actualiza desde el servidor si hay red.
+      void refreshBranding();
+    });
+  }, [hydrate, hydratePin, hydrateServer, hydrateBranding, refreshBranding]);
+
+  const isLoggedIn = !!accessToken;
+
+  // Ofrecer configurar PIN tras el primer login. Debe declararse antes del
+  // return de "Cargando...": un hook después de un return condicional cambia
+  // el número de hooks entre renders y React detiene la app.
+  useEffect(() => {
+    if (isLoggedIn && !pinEnabled && !unlocked) {
+      setShowPinSetup(true);
+    }
+  }, [isLoggedIn, pinEnabled, unlocked]);
+
+  // Con sesión guardada (entrada con PIN, sin volver a escribir la clave) la
+  // sincronización automática también debe arrancar; antes solo lo hacía el
+  // login con usuario y contraseña.
+  const sessionReady = !loading && isLoggedIn && (!pinEnabled || unlocked);
+  useEffect(() => {
+    if (sessionReady) startAutoSync();
+  }, [sessionReady]);
+
+  // Monitoreo del equipo y recorrido: solo con sesión abierta y proyecto
+  // elegido; al cerrar sesión se detiene (los puntos guardados se conservan).
+  const monitorReady = sessionReady && !!activeProjectId;
+  useEffect(() => {
+    if (!monitorReady) return;
+    startDeviceMonitor();
+    return () => stopDeviceMonitor();
+  }, [monitorReady, activeProjectId]);
 
   if (loading) {
     return (
@@ -489,7 +529,6 @@ export default function AppNavigator() {
     );
   }
 
-  const isLoggedIn = !!accessToken;
   const hasSession = !!session;
   const needsProjectSelect =
     hasSession && session.projects.length > 1 && !activeProjectId;
@@ -498,13 +537,6 @@ export default function AppNavigator() {
   const needsPinUnlock = isLoggedIn && pinEnabled && !unlocked;
   // Ofrecer configurar PIN tras primer login si no tiene PIN
   const shouldOfferPinSetup = isLoggedIn && !pinEnabled && !unlocked && showPinSetup;
-
-  // Mostrar pin setup despues de login exitoso
-  useEffect(() => {
-    if (isLoggedIn && !pinEnabled && !unlocked) {
-      setShowPinSetup(true);
-    }
-  }, [isLoggedIn, pinEnabled, unlocked]);
 
   return (
     <NavigationContainer>
@@ -525,6 +557,7 @@ export default function AppNavigator() {
             )}
           </Stack.Navigator>
         )}
+        {monitorReady && !needsPinUnlock && !shouldOfferPinSetup && <RouteNotice />}
       </View>
     </NavigationContainer>
   );

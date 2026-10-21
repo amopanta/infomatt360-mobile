@@ -15,38 +15,47 @@ import {
   TouchableOpacity,
   StyleSheet,
   Alert,
+  AppState,
 } from 'react-native';
 import { useRoute, useNavigation, CommonActions } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import * as Location from 'expo-location';
 import * as ImagePicker from 'expo-image-picker';
-import { v4 as uuidv4 } from 'uuid';
+// uuid v14 necesita crypto.getRandomValues, que no existe en React Native.
+import { randomUUID as uuidv4 } from 'expo-crypto';
 import FieldRenderer from '../components/FieldRenderer';
 import RepeatGroupRenderer, { getRepeatFieldId } from '../components/RepeatGroupRenderer';
 import PageProgressBar from '../components/PageProgressBar';
 import SignatureModal from '../components/SignatureModal';
 import FingerprintModal, { type FingerprintResult } from '../components/FingerprintModal';
 import { validateForm, validateField } from '../utils/validation';
-import { isFieldVisible } from '../utils/conditionalVisibility';
+import { componentVisible, resolveFormValues } from '../utils/formLogic';
 import {
   getCachedForm,
   enqueueRecord,
-  insertEvidence,
   saveAutoDraft,
   promoteDraftToPending,
   deleteAutoDraft,
+  getCachedAssignment,
+  getFormAccessMode,
+  getLocalRecordStatus,
+  getOfflinePackage,
 } from '../../db/database';
+import { checkCapture } from '../../participants/assignmentRules';
 import { useAuthStore } from '../../store/authStore';
+import { requestSync } from '../../sync/syncService';
 import type { FormPage, FormSection, FormComponent, GpsCoordinate, RecordValue } from '../../types';
 import { compressImage, FIELD_CAMERA_OPTIONS } from '../../utils/imageCompressor';
+import { persistEvidenceFile, registerFieldEvidence } from '../../evidence/evidenceFiles';
+import { collectFileValues } from '../../evidence/fileValues';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
 export default function FormCaptureScreen() {
   const route = useRoute<any>();
   const navigation = useNavigation<NativeStackNavigationProp<any>>();
   const { activeProjectId } = useAuthStore();
-  const formId: number = route.params?.formId;
-  const participantId: number | undefined = route.params?.participantId;
+  const formId: string = route.params?.formId;
+  const participantId: string | undefined = route.params?.participantId;
 
   const [formName, setFormName] = useState('');
   const [pages, setPages] = useState<FormPage[]>([]);
@@ -56,10 +65,14 @@ export default function FormCaptureScreen() {
   const [evidencePaths, setEvidencePaths] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState<Map<string, string>>(new Map());
+  // Valores por defecto y calculados (H03), igual que la web
+  const formValues = useMemo(() => resolveFormValues(pages, values), [pages, values]);
   const [signatureFieldId, setSignatureFieldId] = useState<string | null>(null);
   const [fingerprintFieldId, setFingerprintFieldId] = useState<string | null>(null);
   const [repeatCounts, setRepeatCounts] = useState<Record<string, number>>({});
   const draftLocalId = useRef(uuidv4()).current;
+  // Inicio de la captura, para la duración de la entrevista (INTERVIEW_DURATION).
+  const startedAt = useRef(Date.now());
   const submittedRef = useRef(false);
 
   // Cargar formulario desde cache SQLite
@@ -89,6 +102,23 @@ export default function FormCaptureScreen() {
     }
   }, [formId, navigation]);
 
+  // Mismas reglas de asignación que el servidor, también sin red (H02): no
+  // dejar diligenciar algo que luego sería rechazado al sincronizar.
+  useEffect(() => {
+    if (!participantId || !activeProjectId) return;
+    const check = checkCapture({
+      accessMode: getFormAccessMode(formId),
+      assignment: getCachedAssignment(activeProjectId, formId, participantId),
+      localRecordStatus: getLocalRecordStatus(formId, participantId),
+      hasPackage: !!getOfflinePackage(activeProjectId),
+    });
+    if (!check.allowed) {
+      Alert.alert('No se puede aplicar', check.reason ?? 'La actividad no está disponible.', [
+        { text: 'Volver', onPress: () => navigation.goBack() },
+      ]);
+    }
+  }, [formId, participantId, activeProjectId, navigation]);
+
   // Capturar GPS automaticamente
   useEffect(() => {
     (async () => {
@@ -112,57 +142,46 @@ export default function FormCaptureScreen() {
     })();
   }, []);
 
-  // Auto-guardado cada 30 segundos
-  useEffect(() => {
-    if (!activeProjectId || !formId) return;
-
-    const interval = setInterval(() => {
-      if (submittedRef.current) return;
-      const hasData = Object.keys(values).length > 0;
-      if (!hasData) return;
-
-      const recordValues = Object.entries(values).map(([fieldId, val]) => ({
-        field_id: fieldId,
-        field_name: fieldId,
-        field_value_json: val,
-      }));
-
+  // Autoguardado del borrador (H05). Antes: un intervalo de 30 s que se
+  // reiniciaba con cada tecla (nunca guardaba mientras se escribía) y un
+  // guardado al salir que veía los valores vacíos del primer instante.
+  // Ahora: 1,5 s después de cada cambio, al pasar a segundo plano y al salir,
+  // siempre con los valores más recientes.
+  const latestDraft = useRef({ values, gps, currentPage });
+  latestDraft.current = { values, gps, currentPage };
+  const persistDraft = useCallback(() => {
+    if (submittedRef.current || !activeProjectId || !formId) return;
+    const { values: current, gps: currentGps, currentPage: page } = latestDraft.current;
+    if (Object.keys(current).length === 0) return;
+    try {
       saveAutoDraft({
         localId: draftLocalId,
         projectId: activeProjectId,
         templateId: formId,
-        data: recordValues,
-        gps: gps ? { lat: gps.lat, lng: gps.lng, accuracy: gps.accuracy } : null,
+        participantId,
+        data: Object.entries(current).map(([fieldId, val]) => ({ field_id: fieldId, field_name: fieldId, field_value_json: val })),
+        gps: currentGps ? { lat: currentGps.lat, lng: currentGps.lng, accuracy: currentGps.accuracy } : null,
+        page,
       });
-    }, 30000);
+    } catch {
+      // Sin espacio u otro error de la base: se reintenta en el próximo cambio.
+    }
+  }, [activeProjectId, formId, draftLocalId, participantId]);
 
-    return () => clearInterval(interval);
-  }, [activeProjectId, formId, values, gps, draftLocalId]);
-
-  // Limpiar auto-draft al desmontar si no fue enviado
   useEffect(() => {
+    const timer = setTimeout(persistDraft, 1500);
+    return () => clearTimeout(timer);
+  }, [values, gps, currentPage, persistDraft]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') persistDraft();
+    });
     return () => {
-      if (!submittedRef.current) {
-        // Si hay datos, guardar una ultima vez antes de salir
-        const hasData = Object.keys(values).length > 0;
-        if (hasData && activeProjectId) {
-          const recordValues = Object.entries(values).map(([fieldId, val]) => ({
-            field_id: fieldId,
-            field_name: fieldId,
-            field_value_json: val,
-          }));
-          saveAutoDraft({
-            localId: draftLocalId,
-            projectId: activeProjectId,
-            templateId: formId,
-            data: recordValues,
-            gps: gps ? { lat: gps.lat, lng: gps.lng, accuracy: gps.accuracy } : null,
-          });
-        }
-      }
+      sub.remove();
+      persistDraft();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [persistDraft]);
 
   // Cambiar valor de un campo — limpia error al editar
   const handleFieldChange = useCallback((fieldId: string, value: unknown) => {
@@ -193,8 +212,11 @@ export default function FormCaptureScreen() {
       if (!result.canceled && result.assets[0]) {
         const asset = result.assets[0];
         const compressed = await compressImage(asset.uri);
-        handleFieldChange(fieldId, { uri: compressed.uri, type: 'photo', fileSize: compressed.fileSize });
-        setEvidencePaths((prev) => [...prev, compressed.uri]);
+        // La foto comprimida queda en caché (Android la puede vaciar): se
+        // guarda en evidencias hasta que el servidor la confirme.
+        const saved = await persistEvidenceFile(compressed.uri, { type: 'photo', fileName: 'foto.jpg', mimeType: 'image/jpeg' });
+        handleFieldChange(fieldId, saved);
+        setEvidencePaths((prev) => [...prev, saved.uri]);
       }
     },
     [handleFieldChange],
@@ -247,7 +269,7 @@ export default function FormCaptureScreen() {
       navigation.navigate('DocumentScanner', {
         fieldId,
         onDocumentScanned: (uri: string, fileName: string) => {
-          handleFieldChange(fieldId, { uri, fileName, type: 'document' });
+          handleFieldChange(fieldId, { uri, fileName, type: 'document', mimeType: 'application/pdf' });
           setEvidencePaths((prev) => [...prev, uri]);
         },
       });
@@ -255,53 +277,41 @@ export default function FormCaptureScreen() {
     [navigation, handleFieldChange],
   );
 
-  // Repeat group: agregar instancia
-  const handleAddRepeatInstance = useCallback((sectionId: string, maxReps: number) => {
+  // Repeat group: agregar instancia. `currentCount` es lo que se ve en
+  // pantalla, para grupos anidados que aún no tienen contador propio.
+  const handleAddRepeatInstance = useCallback((sectionId: string, maxReps: number, currentCount?: number) => {
     setRepeatCounts((prev) => {
-      const current = prev[sectionId] ?? 1;
+      const current = prev[sectionId] ?? currentCount ?? 1;
       if (current >= maxReps) return prev;
       return { ...prev, [sectionId]: current + 1 };
     });
   }, []);
 
-  // Repeat group: eliminar instancia y reasignar valores
-  const handleRemoveRepeatInstance = useCallback((sectionId: string, index: number, components: FormComponent[]) => {
-    setRepeatCounts((prev) => {
-      const current = prev[sectionId] ?? 1;
-      return { ...prev, [sectionId]: Math.max(1, current - 1) };
-    });
-    // Reasignar valores: mover indices posteriores hacia abajo
-    setValues((prev) => {
-      const next = { ...prev };
-      const count = repeatCounts[sectionId] ?? 1;
-      // Eliminar valores de la instancia borrada
-      for (const comp of components) {
-        delete next[getRepeatFieldId(sectionId, index, comp.id)];
+  // Repeat group: eliminar instancia y correr hacia arriba las siguientes.
+  // Trabaja por prefijo de clave ("grupo[3]...") para mover también los
+  // valores y contadores de los grupos anidados dentro de cada fila.
+  const handleRemoveRepeatInstance = useCallback((sectionId: string, index: number) => {
+    const prefix = `${sectionId}[`;
+    const shiftKey = (key: string): string | null => {
+      if (!key.startsWith(prefix)) return key;
+      const match = key.slice(prefix.length).match(/^(\d+)\](.*)$/);
+      if (!match) return key;
+      const i = Number(match[1]);
+      if (i === index) return null;
+      return i < index ? key : `${prefix}${i - 1}]${match[2]}`;
+    };
+    function remap<T>(entries: [string, T][]): Record<string, T> {
+      const out: Record<string, T> = {};
+      for (const [key, value] of entries) {
+        const next = shiftKey(key);
+        if (next !== null) out[next] = value;
       }
-      // Mover instancias posteriores una posicion hacia abajo
-      for (let i = index + 1; i < count; i++) {
-        for (const comp of components) {
-          const oldKey = getRepeatFieldId(sectionId, i, comp.id);
-          const newKey = getRepeatFieldId(sectionId, i - 1, comp.id);
-          if (next[oldKey] !== undefined) {
-            next[newKey] = next[oldKey];
-          }
-          delete next[oldKey];
-        }
-      }
-      return next;
-    });
-    // Limpiar errores de la instancia
-    setErrors((prev) => {
-      const next = new Map(prev);
-      for (const key of next.keys()) {
-        if (key.startsWith(`${sectionId}[`)) {
-          next.delete(key);
-        }
-      }
-      return next;
-    });
-  }, [repeatCounts]);
+      return out;
+    }
+    setValues((prev) => remap(Object.entries(prev)));
+    setRepeatCounts((prev) => ({ ...remap(Object.entries(prev)), [sectionId]: Math.max(0, (prev[sectionId] ?? 1) - 1) }));
+    setErrors((prev) => new Map(Object.entries(remap([...prev.entries()]))));
+  }, []);
 
   const handleSignatureSave = useCallback(
     (signatureBase64: string) => {
@@ -340,7 +350,7 @@ export default function FormCaptureScreen() {
     if (!activeProjectId) return;
 
     // Validar todos los campos antes de guardar (incluye repeat groups)
-    const validationErrors = validateForm(pages, values, repeatCounts);
+    const validationErrors = validateForm(pages, formValues, repeatCounts);
     if (validationErrors.size > 0) {
       setErrors(validationErrors);
       Alert.alert(
@@ -354,13 +364,10 @@ export default function FormCaptureScreen() {
     submittedRef.current = true;
 
     try {
-      // Eliminar auto-draft antes de crear el registro real
-      deleteAutoDraft(draftLocalId);
-
       const recordLocalId = uuidv4();
 
       // Construir valores para el Record Engine (doc 25)
-      const recordValues: RecordValue[] = Object.entries(values).map(
+      const recordValues: RecordValue[] = Object.entries(withInterviewDuration(pages, formValues, startedAt.current)).map(
         ([fieldId, val]) => ({
           field_id: fieldId,
           field_name: fieldId,
@@ -375,23 +382,21 @@ export default function FormCaptureScreen() {
         templateId: formId,
         participantId,
         data: recordValues,
-        evidencePaths,
+        evidencePaths: collectFileValues(values).map((file) => file.uri),
         gps: gps ? { lat: gps.lat, lng: gps.lng, accuracy: gps.accuracy } : undefined,
       });
 
-      // Registrar evidencias en la tabla de evidencias
-      // Detectar huellas digitales por su ruta (directorio fingerprints/)
-      for (const uri of evidencePaths) {
-        const isFingerprint = uri.includes('/fingerprints/');
-        insertEvidence({
-          localId: uuidv4(),
-          recordLocalId,
-          type: isFingerprint ? 'fingerprint' : 'photo',
-          fileUri: uri,
-          mimeType: isFingerprint && uri.endsWith('.png') ? 'image/png' : 'image/jpeg',
-          fileSize: 0, // se actualizara al subir
-        });
-      }
+      // Registrar como evidencia cada archivo que quedó en las respuestas
+      // (fotos, PDF, audio, video, archivos, huellas), con su tipo real.
+      registerFieldEvidence(recordLocalId, values);
+
+      // El borrador se borra solo después de guardar el registro: si algo
+      // falla antes, las respuestas siguen a salvo en el borrador.
+      deleteAutoDraft(draftLocalId);
+
+      // Envío automático, ya con las evidencias registradas: si hay señal sale
+      // ya; si no, lo envía el ciclo automático o el aviso de reconexión.
+      void requestSync();
 
       Alert.alert(
         'Registro guardado',
@@ -440,7 +445,7 @@ export default function FormCaptureScreen() {
     } finally {
       setSaving(false);
     }
-  }, [activeProjectId, formId, draftLocalId, values, repeatCounts, evidencePaths, gps, navigation]);
+  }, [activeProjectId, formId, draftLocalId, values, formValues, repeatCounts, evidencePaths, gps, navigation]);
 
   // Obtener secciones de la pagina actual
   const page = pages[currentPage];
@@ -457,7 +462,7 @@ export default function FormCaptureScreen() {
     }
   }
   const visibleNormalComponents = normalComponents.filter((comp) =>
-    isFieldVisible(comp.conditionalVisibility, values),
+    componentVisible(comp, formValues),
   );
 
   // Secciones repetibles de la pagina actual
@@ -495,7 +500,7 @@ export default function FormCaptureScreen() {
           for (const row of section.rows) {
             for (const col of row.columns) {
               for (const comp of col.components) {
-                if (!isFieldVisible(comp.conditionalVisibility, values)) continue;
+                if (!componentVisible(comp, formValues)) continue;
                 if (errors.has(comp.id)) hasErrors = true;
                 if (comp.required && (values[comp.id] === undefined || values[comp.id] === null || values[comp.id] === '')) {
                   allFilled = false;
@@ -551,16 +556,11 @@ export default function FormCaptureScreen() {
                 values={values}
                 errors={errors}
                 onChange={handleFieldChange}
-                onAddInstance={() => handleAddRepeatInstance(sectionId, section.maxRepetitions ?? 50)}
-                onRemoveInstance={(index) => {
-                  const comps: FormComponent[] = [];
-                  for (const row of section.rows) {
-                    for (const col of row.columns) {
-                      comps.push(...col.components);
-                    }
-                  }
-                  handleRemoveRepeatInstance(sectionId, index, comps);
-                }}
+                onAddInstance={() => handleAddRepeatInstance(sectionId, section.maxRepetitions ?? 50, repeatCounts[sectionId] ?? (section.minRepetitions ?? 1))}
+                onRemoveInstance={(index) => handleRemoveRepeatInstance(sectionId, index)}
+                repeatCounts={repeatCounts}
+                onAddNested={handleAddRepeatInstance}
+                onRemoveNested={handleRemoveRepeatInstance}
                 onCapturePhoto={handleCapturePhoto}
                 onCaptureGps={handleCaptureGps}
                 onCaptureSignature={handleCaptureSignature}
@@ -578,7 +578,7 @@ export default function FormCaptureScreen() {
             }
           }
           const visibleComps = sectionComponents.filter((comp) =>
-            isFieldVisible(comp.conditionalVisibility, values),
+            componentVisible(comp, formValues),
           );
           if (visibleComps.length === 0) return null;
 
@@ -732,3 +732,21 @@ const styles = StyleSheet.create({
     backgroundColor: colors.disabled,
   },
 });
+
+/** Segundos desde que se abrió la captura en cada campo INTERVIEW_DURATION. */
+function withInterviewDuration(pages: FormPage[], values: Record<string, unknown>, startedAt: number): Record<string, unknown> {
+  const seconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+  const next = { ...values };
+  for (const page of pages) {
+    for (const section of page.sections) {
+      for (const row of section.rows) {
+        for (const col of row.columns) {
+          for (const comp of col.components) {
+            if ((comp.config as any)?.backendType === 'INTERVIEW_DURATION') next[comp.id] = seconds;
+          }
+        }
+      }
+    }
+  }
+  return next;
+}

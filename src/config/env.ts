@@ -26,4 +26,14 @@ export const ENV = {
 
   /** Tamano maximo de lote para bulk-save */
   BULK_BATCH_SIZE: 200,
+
+  /** Versión que la app informa al servidor (igual a app.json) */
+  APP_VERSION: '1.0.0',
+
+  /** Cada cuánto informa la app su estado al servidor (ms) */
+  HEARTBEAT_INTERVAL: 5 * 60_000,
+
+  /** Recorrido del gestor: un punto cada 2 min o al moverse 30 m */
+  ROUTE_INTERVAL: 2 * 60_000,
+  ROUTE_DISTANCE_M: 30,
 };

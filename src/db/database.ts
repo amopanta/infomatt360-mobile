@@ -13,23 +13,99 @@ import * as SQLite from 'expo-sqlite';
 
 let db: SQLite.SQLiteDatabase | null = null;
 
+// ── Una base por usuario (H07) ───────────────────────────────────────
+// Antes había una sola base para todo el equipo: en una tableta compartida
+// el segundo usuario veía los borradores del primero y la sincronización
+// enviaba los pendientes del primero con la sesión del segundo. Ahora cada
+// usuario tiene su archivo; sin sesión se usa una base del equipo (ajustes y
+// errores de la app). La base anterior (infomatt360.db) queda para el primer
+// usuario que entra después de la actualización (ver sessionOwner.ts).
+const LEGACY_DB = 'infomatt360.db';
+const DEVICE_DB = 'infomatt360_device.db';
+let owner: { userId: string; useLegacyFile: boolean } | null = null;
+
+export function databaseFileFor(userId: string, useLegacyFile: boolean): string {
+  return useLegacyFile ? LEGACY_DB : `infomatt360_u_${userId.replace(/[^A-Za-z0-9-]/g, '')}.db`;
+}
+
+/** Cambia la base activa al usuario indicado (null = sin sesión). */
+export function setDatabaseOwner(next: { userId: string; useLegacyFile: boolean } | null): void {
+  if (owner?.userId === next?.userId && owner?.useLegacyFile === next?.useLegacyFile) return;
+  try { db?.closeSync(); } catch { /* ya cerrada */ }
+  db = null;
+  owner = next;
+}
+
+export function getDatabaseOwner(): string | null {
+  return owner?.userId ?? null;
+}
+
 export function getDatabase(): SQLite.SQLiteDatabase {
   if (!db) {
-    db = SQLite.openDatabaseSync('infomatt360.db');
+    db = SQLite.openDatabaseSync(owner ? databaseFileFor(owner.userId, owner.useLegacyFile) : DEVICE_DB);
     initializeDatabase(db);
   }
   return db;
+}
+
+let deviceDb: SQLite.SQLiteDatabase | null = null;
+
+/** Base del equipo (ajustes de la app): la misma para todos los usuarios. */
+export function getDeviceDatabase(): SQLite.SQLiteDatabase {
+  if (!deviceDb) deviceDb = SQLite.openDatabaseSync(DEVICE_DB);
+  return deviceDb;
+}
+
+/** Registros sin enviar (pendientes, con error, en conflicto o borradores) en la base de otro usuario. */
+export function unsentCountForUser(userId: string, useLegacyFile: boolean): number {
+  if (owner?.userId === userId) return 0;
+  let other: SQLite.SQLiteDatabase | null = null;
+  try {
+    other = SQLite.openDatabaseSync(databaseFileFor(userId, useLegacyFile));
+    const row = other.getFirstSync<{ n: number }>(
+      `SELECT COUNT(*) as n FROM queued_records WHERE status IN ('pending', 'error', 'conflict', 'draft')`,
+    );
+    return row?.n ?? 0;
+  } catch {
+    return 0; // base sin tablas: nunca capturó
+  } finally {
+    try { other?.closeSync(); } catch { /* nada */ }
+  }
+}
+
+/** Borra la base del usuario activo (borrado remoto o al cerrar sesión en equipo compartido). */
+export function deleteActiveUserDatabase(): string[] {
+  if (!owner) return [];
+  const database = getDatabase();
+  const files = [
+    ...database.getAllSync<{ file_uri: string }>(`SELECT file_uri FROM evidence`).map((r) => r.file_uri),
+  ];
+  const name = databaseFileFor(owner.userId, owner.useLegacyFile);
+  try { database.closeSync(); } catch { /* ya cerrada */ }
+  db = null;
+  SQLite.deleteDatabaseSync(name);
+  return files;
 }
 
 function initializeDatabase(database: SQLite.SQLiteDatabase): void {
   database.execSync(`PRAGMA journal_mode = WAL;`);
   database.execSync(`PRAGMA foreign_keys = ON;`);
 
+  // v2: el backend usa UUID (texto) como identificador. Las tablas de cache
+  // se crearon con INTEGER PRIMARY KEY, que rechaza UUID; como solo guardan
+  // copias descargables del servidor, se recrean sin perder capturas.
+  const version = database.getFirstSync<{ user_version: number }>('PRAGMA user_version')?.user_version ?? 0;
+  if (version < 2) {
+    database.execSync(`DROP TABLE IF EXISTS form_templates;`);
+    database.execSync(`DROP TABLE IF EXISTS participants;`);
+    database.execSync(`PRAGMA user_version = 2;`);
+  }
+
   // Cache de plantillas de formularios
   database.execSync(`
     CREATE TABLE IF NOT EXISTS form_templates (
-      id INTEGER PRIMARY KEY,
-      project_id INTEGER NOT NULL,
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
       template_id TEXT NOT NULL,
       version INTEGER NOT NULL DEFAULT 1,
       name TEXT NOT NULL,
@@ -114,8 +190,8 @@ function initializeDatabase(database: SQLite.SQLiteDatabase): void {
   // Cache de participantes para vista 360
   database.execSync(`
     CREATE TABLE IF NOT EXISTS participants (
-      id INTEGER PRIMARY KEY,
-      project_id INTEGER NOT NULL,
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
       full_name TEXT NOT NULL,
       document_type TEXT NOT NULL DEFAULT 'CC',
       document_number TEXT NOT NULL,
@@ -153,24 +229,84 @@ function initializeDatabase(database: SQLite.SQLiteDatabase): void {
   database.execSync(`
     CREATE INDEX IF NOT EXISTS idx_crash_logs_created ON crash_logs(created_at);
   `);
+
+  // Recorrido del gestor: se guarda aquí aunque no haya señal y se envía
+  // con el siguiente latido (POST /field-devices/heartbeat).
+  database.execSync(`
+    CREATE TABLE IF NOT EXISTS route_points (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id TEXT,
+      latitude REAL NOT NULL,
+      longitude REAL NOT NULL,
+      accuracy_m REAL,
+      recorded_at TEXT NOT NULL,
+      sent INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  database.execSync(`
+    CREATE INDEX IF NOT EXISTS idx_route_points_sent ON route_points(sent, recorded_at);
+  `);
+
+  // Paquete sin conexión (H02): asignaciones del gestor y fecha de la última
+  // descarga por proyecto, para trabajar y validar sin red.
+  try {
+    database.execSync(`ALTER TABLE form_templates ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'legacy';`);
+  } catch { /* columna ya existe */ }
+  // Versión de formularios (H01): huella del servidor, formularios retirados
+  // (despublicados) que se conservan mientras haya borradores o pendientes, y
+  // la versión con la que se empezó cada registro.
+  for (const ddl of [
+    `ALTER TABLE form_templates ADD COLUMN version_hash TEXT`,
+    `ALTER TABLE form_templates ADD COLUMN retired INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE form_templates ADD COLUMN server_updated_at TEXT`,
+    `ALTER TABLE queued_records ADD COLUMN template_version TEXT`,
+    // Correcciones de registros devueltos (docs/141): versión y observaciones
+    `ALTER TABLE queued_records ADD COLUMN lock_version INTEGER`,
+    `ALTER TABLE queued_records ADD COLUMN observations_json TEXT`,
+    // Página donde quedó el borrador (docs/141 §2)
+    `ALTER TABLE queued_records ADD COLUMN draft_page INTEGER`,
+  ]) {
+    try { database.execSync(`${ddl};`); } catch { /* columna ya existe */ }
+  }
+  database.execSync(`
+    CREATE TABLE IF NOT EXISTS form_assignments_cache (
+      project_id TEXT NOT NULL,
+      template_id TEXT NOT NULL,
+      participant_id TEXT NOT NULL,
+      access_mode TEXT NOT NULL,
+      assignment_status TEXT NOT NULL,
+      record_id TEXT,
+      PRIMARY KEY (project_id, template_id, participant_id)
+    );
+  `);
+  database.execSync(`
+    CREATE TABLE IF NOT EXISTS offline_packages (
+      project_id TEXT PRIMARY KEY,
+      downloaded_at TEXT NOT NULL,
+      participant_count INTEGER NOT NULL DEFAULT 0,
+      assignment_count INTEGER NOT NULL DEFAULT 0
+    );
+  `);
 }
 
 // ── Operaciones de la cola offline ───────────────────────────────────
 
 export function enqueueRecord(record: {
   localId: string;
-  projectId: number;
-  templateId: number;
-  participantId?: number;
+  projectId: string;
+  templateId: string;
+  participantId?: string;
   data: unknown[];
   evidencePaths: string[];
   gps?: { lat: number; lng: number; accuracy: number };
+  /** Versión del formulario con la que se capturó (por defecto, la vigente) */
+  templateVersion?: string | null;
 }): void {
   const db = getDatabase();
   db.runSync(
     `INSERT INTO queued_records
-       (local_id, project_id, template_id, participant_id, status, data_json, evidence_paths_json, gps_json)
-     VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)`,
+       (local_id, project_id, template_id, participant_id, status, data_json, evidence_paths_json, gps_json, template_version)
+     VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
     [
       record.localId,
       record.projectId,
@@ -179,15 +315,16 @@ export function enqueueRecord(record: {
       JSON.stringify(record.data),
       JSON.stringify(record.evidencePaths),
       record.gps ? JSON.stringify(record.gps) : null,
+      record.templateVersion ?? getFormVersion(record.templateId)?.version_hash ?? null,
     ],
   );
 }
 
 export function listPendingRecords(): {
   local_id: string;
-  project_id: number;
-  template_id: number;
-  participant_id: number | null;
+  project_id: string;
+  template_id: string;
+  participant_id: string | null;
   data_json: string;
   evidence_paths_json: string;
   gps_json: string | null;
@@ -203,11 +340,15 @@ export function listPendingRecords(): {
   ) as any;
 }
 
-export function markRecordSynced(localId: string): void {
+/** serverRecordId: id asignado por el backend; se usa para vincular después
+ * las evidencias adjuntas (POST /files/upload con record_id). */
+export function markRecordSynced(localId: string, serverRecordId: string | null = null): void {
   const db = getDatabase();
   db.runSync(
-    `UPDATE queued_records SET status = 'synced', synced_at = datetime('now') WHERE local_id = ?`,
-    [localId],
+    `UPDATE queued_records SET status = 'synced', synced_at = datetime('now'),
+            server_record_id = COALESCE(?, server_record_id)
+     WHERE local_id = ?`,
+    [serverRecordId, localId],
   );
 }
 
@@ -217,6 +358,12 @@ export function markRecordError(localId: string, error: string): void {
     `UPDATE queued_records SET status = 'error', error_message = ? WHERE local_id = ?`,
     [error, localId],
   );
+}
+
+/** Intento fallido por red: el registro sigue pendiente, solo se anota el motivo. */
+export function noteSyncAttemptFailed(localId: string, message: string): void {
+  const db = getDatabase();
+  db.runSync(`UPDATE queued_records SET error_message = ? WHERE local_id = ? AND status = 'pending'`, [message, localId]);
 }
 
 export function resetErrorRecords(): void {
@@ -230,7 +377,7 @@ export function resetErrorRecords(): void {
 export function markRecordConflict(
   localId: string,
   serverData: unknown[],
-  serverRecordId: number | null,
+  serverRecordId: string | null,
   serverUpdatedAt: string | null,
 ): void {
   const db = getDatabase();
@@ -254,12 +401,12 @@ export function markRecordConflict(
 /** Lista todos los registros en estado de conflicto */
 export function listConflictRecords(): {
   local_id: string;
-  project_id: number;
-  template_id: number;
-  participant_id: number | null;
+  project_id: string;
+  template_id: string;
+  participant_id: string | null;
   data_json: string;
   server_data_json: string | null;
-  server_record_id: number | null;
+  server_record_id: string | null;
   server_updated_at: string | null;
   created_at: string;
   updated_at: string;
@@ -354,9 +501,9 @@ export function getConflictCount(): number {
 
 export function getQueuedRecord(localId: string): {
   local_id: string;
-  project_id: number;
-  template_id: number;
-  participant_id: number | null;
+  project_id: string;
+  template_id: string;
+  participant_id: string | null;
   status: string;
   data_json: string;
   evidence_paths_json: string;
@@ -375,7 +522,9 @@ export function updateQueuedRecord(localId: string, data: unknown[], gps?: { lat
   db.runSync(
     `UPDATE queued_records
      SET data_json = ?, gps_json = ?, status = 'pending', error_message = NULL,
-         updated_at = datetime('now'), server_data_json = NULL, server_record_id = NULL, server_updated_at = NULL
+         updated_at = datetime('now'), server_data_json = NULL, server_record_id = NULL, server_updated_at = NULL,
+         -- Al guardar, el gestor ya revisó las respuestas con la versión vigente
+         template_version = COALESCE((SELECT version_hash FROM form_templates f WHERE f.id = queued_records.template_id), template_version)
      WHERE local_id = ?`,
     [
       JSON.stringify(data),
@@ -388,10 +537,14 @@ export function updateQueuedRecord(localId: string, data: unknown[], gps?: { lat
 /** Guarda o actualiza un borrador auto-guardado (status = 'draft') */
 export function saveAutoDraft(params: {
   localId: string;
-  projectId: number;
-  templateId: number;
+  projectId: string;
+  templateId: string;
+  /** Antes no se guardaba: un borrador de formulario cerrado quedaba sin participante */
+  participantId?: string | null;
   data: unknown[];
   gps?: { lat: number; lng: number; accuracy: number } | null;
+  /** Página donde quedó (se retoma ahí) */
+  page?: number;
 }): void {
   const db = getDatabase();
   const existing = db.getFirstSync(
@@ -400,20 +553,23 @@ export function saveAutoDraft(params: {
   );
   if (existing) {
     db.runSync(
-      `UPDATE queued_records SET data_json = ?, gps_json = ? WHERE local_id = ?`,
-      [JSON.stringify(params.data), params.gps ? JSON.stringify(params.gps) : null, params.localId],
+      `UPDATE queued_records SET data_json = ?, gps_json = ?, draft_page = ? WHERE local_id = ?`,
+      [JSON.stringify(params.data), params.gps ? JSON.stringify(params.gps) : null, params.page ?? 0, params.localId],
     );
   } else {
     db.runSync(
       `INSERT INTO queued_records
-         (local_id, project_id, template_id, participant_id, status, data_json, evidence_paths_json, gps_json)
-       VALUES (?, ?, ?, NULL, 'draft', ?, '[]', ?)`,
+         (local_id, project_id, template_id, participant_id, status, data_json, evidence_paths_json, gps_json, template_version, draft_page)
+       VALUES (?, ?, ?, ?, 'draft', ?, '[]', ?, ?, ?)`,
       [
         params.localId,
         params.projectId,
         params.templateId,
+        params.participantId ?? null,
         JSON.stringify(params.data),
         params.gps ? JSON.stringify(params.gps) : null,
+        getFormVersion(params.templateId)?.version_hash ?? null,
+        params.page ?? 0,
       ],
     );
   }
@@ -443,12 +599,12 @@ export function deleteQueuedRecord(localId: string): void {
 }
 
 /** Conteo de registros agrupados por template_id y status */
-export function getRecordCountsByTemplate(): Record<number, { pending: number; synced: number; error: number; draft: number; conflict: number }> {
+export function getRecordCountsByTemplate(): Record<string, { pending: number; synced: number; error: number; draft: number; conflict: number }> {
   const db = getDatabase();
-  const rows = db.getAllSync<{ template_id: number; status: string; count: number }>(
+  const rows = db.getAllSync<{ template_id: string; status: string; count: number }>(
     `SELECT template_id, status, COUNT(*) as count FROM queued_records GROUP BY template_id, status`,
   );
-  const result: Record<number, { pending: number; synced: number; error: number; draft: number; conflict: number }> = {};
+  const result: Record<string, { pending: number; synced: number; error: number; draft: number; conflict: number }> = {};
   for (const row of rows) {
     if (!result[row.template_id]) {
       result[row.template_id] = { pending: 0, synced: 0, error: 0, draft: 0, conflict: 0 };
@@ -465,7 +621,7 @@ export function getRecordCountsByTemplate(): Record<number, { pending: number; s
  * Estadísticas por formulario filtradas por rango de fechas.
  */
 export function getStatsByTemplate(dateFrom?: string, dateTo?: string): {
-  templateId: number;
+  templateId: string;
   templateName: string;
   total: number;
   synced: number;
@@ -492,7 +648,7 @@ export function getStatsByTemplate(dateFrom?: string, dateTo?: string): {
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
   const rows = db.getAllSync<{
-    template_id: number;
+    template_id: string;
     template_name: string;
     total: number;
     synced: number;
@@ -603,7 +759,7 @@ export function getGlobalStats(dateFrom?: string, dateTo?: string): {
 }
 
 /** Estadisticas de cobertura de participantes */
-export function getParticipantCoverageStats(projectId: number): {
+export function getParticipantCoverageStats(projectId: string): {
   totalParticipants: number;
   withRecords: number;
   withoutRecords: number;
@@ -718,29 +874,59 @@ export function getPendingCount(): number {
   return row?.count ?? 0;
 }
 
+/** Archivos locales liberados por la última purga (los borra el llamador). */
+let purgedFiles: string[] = [];
+export function takePurgedEvidenceFiles(): string[] {
+  const files = purgedFiles;
+  purgedFiles = [];
+  return files;
+}
+
+/**
+ * Borra registros sincronizados hace más de `retentionDays` días junto con
+ * sus evidencias. Nunca toca pendientes, errores, conflictos ni registros con
+ * alguna evidencia sin confirmar por el servidor (H04: limpieza solo tras
+ * acuse definitivo). Antes fallaba con FOREIGN KEY si el registro tenía
+ * evidencias, y el error detenía la sincronización automática.
+ */
 export function purgeOldSynced(retentionDays: number = 7): number {
   const db = getDatabase();
-  const result = db.runSync(
-    `DELETE FROM queued_records
-     WHERE status = 'synced'
-       AND synced_at < datetime('now', ? || ' days')`,
+  const rows = db.getAllSync<{ local_id: string }>(
+    `SELECT q.local_id FROM queued_records q
+     WHERE q.status = 'synced'
+       AND q.synced_at < datetime('now', ? || ' days')
+       AND NOT EXISTS (SELECT 1 FROM evidence e WHERE e.record_local_id = q.local_id AND e.uploaded = 0)`,
     [`-${retentionDays}`],
   );
-  return result.changes;
+  if (!rows.length) return 0;
+  const ids = rows.map((r) => r.local_id);
+  const marks = ids.map(() => '?').join(',');
+  const files = db.getAllSync<{ file_uri: string }>(`SELECT file_uri FROM evidence WHERE record_local_id IN (${marks})`, ids);
+  db.execSync('BEGIN');
+  try {
+    db.runSync(`DELETE FROM evidence WHERE record_local_id IN (${marks})`, ids);
+    db.runSync(`DELETE FROM queued_records WHERE local_id IN (${marks})`, ids);
+    db.execSync('COMMIT');
+  } catch (error) {
+    db.execSync('ROLLBACK');
+    throw error;
+  }
+  purgedFiles.push(...files.map((f) => f.file_uri));
+  return ids.length;
 }
 
 /** Lista todos los registros (para exportacion) */
 export function listAllRecords(filters?: {
-  projectId?: number;
-  templateId?: number;
+  projectId?: string;
+  templateId?: string;
   status?: string;
   fromDate?: string;
   toDate?: string;
 }): {
   local_id: string;
-  project_id: number;
-  template_id: number;
-  participant_id: number | null;
+  project_id: string;
+  template_id: string;
+  participant_id: string | null;
   status: string;
   data_json: string;
   gps_json: string | null;
@@ -813,22 +999,48 @@ export function getRecordEvidence(recordLocalId: string): {
   file_uri: string;
   remote_url: string | null;
   mime_type: string;
+  file_size: number;
   uploaded: number;
 }[] {
   const db = getDatabase();
   return db.getAllSync(
-    `SELECT local_id, type, file_uri, remote_url, mime_type, uploaded
+    `SELECT local_id, type, file_uri, remote_url, mime_type, file_size, uploaded
      FROM evidence WHERE record_local_id = ?`,
     [recordLocalId],
   ) as any;
 }
 
-export function markEvidenceUploaded(localId: string, remoteUrl: string): void {
+export function markEvidenceUploaded(localId: string, remoteUrl: string, fileSize?: number): void {
   const db = getDatabase();
   db.runSync(
-    `UPDATE evidence SET uploaded = 1, remote_url = ? WHERE local_id = ?`,
-    [remoteUrl, localId],
+    `UPDATE evidence SET uploaded = 1, remote_url = ?, file_size = COALESCE(?, file_size) WHERE local_id = ?`,
+    [remoteUrl, fileSize ?? null, localId],
   );
+}
+
+/** Reemplaza solo los valores capturados (sin tocar estado, GPS ni conflictos). */
+export function replaceRecordData(localId: string, data: unknown[]): void {
+  const db = getDatabase();
+  db.runSync(`UPDATE queued_records SET data_json = ? WHERE local_id = ?`, [JSON.stringify(data), localId]);
+}
+
+/** Evidencias adjuntas aún sin subir cuyo registro ya existe en el servidor. */
+export function listEvidenceAwaitingRecord(): {
+  local_id: string;
+  type: string;
+  file_uri: string;
+  mime_type: string;
+  project_id: string;
+  participant_id: string | null;
+  server_record_id: string;
+}[] {
+  const db = getDatabase();
+  return db.getAllSync(
+    `SELECT e.local_id, e.type, e.file_uri, e.mime_type,
+            q.project_id, q.participant_id, q.server_record_id
+     FROM evidence e JOIN queued_records q ON q.local_id = e.record_local_id
+     WHERE e.uploaded = 0 AND q.status = 'synced' AND q.server_record_id IS NOT NULL`,
+  ) as any;
 }
 
 export function getPendingEvidenceCount(): number {
@@ -842,19 +1054,20 @@ export function getPendingEvidenceCount(): number {
 // ── Cache de formularios ─────────────────────────────────────────────
 
 export function cacheFormTemplate(template: {
-  id: number;
-  projectId: number;
+  id: string;
+  projectId: string;
   templateId: string;
   version: number;
   name: string;
   description?: string;
   schemaJson: string;
+  accessMode?: string;
 }): void {
   const db = getDatabase();
   db.runSync(
     `INSERT OR REPLACE INTO form_templates
-       (id, project_id, template_id, version, name, description, schema_json, downloaded_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+       (id, project_id, template_id, version, name, description, schema_json, access_mode, downloaded_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
     [
       template.id,
       template.projectId,
@@ -863,28 +1076,35 @@ export function cacheFormTemplate(template: {
       template.name,
       template.description ?? null,
       template.schemaJson,
+      template.accessMode ?? 'legacy',
     ],
   );
 }
 
-export function getCachedForms(projectId: number): {
-  id: number;
-  project_id: number;
+export function getFormAccessMode(formId: string): string {
+  const row = getDatabase().getFirstSync<{ access_mode: string }>(`SELECT access_mode FROM form_templates WHERE id = ?`, [formId]);
+  return row?.access_mode ?? 'legacy';
+}
+
+export function getCachedForms(projectId: string): {
+  id: string;
+  project_id: string;
   template_id: string;
   version: number;
   name: string;
   description: string | null;
   schema_json: string;
+  server_updated_at: string | null;
 }[] {
   const db = getDatabase();
   return db.getAllSync(
-    `SELECT * FROM form_templates WHERE project_id = ? ORDER BY name`,
+    `SELECT * FROM form_templates WHERE project_id = ? AND retired = 0 ORDER BY name`,
     [projectId],
   ) as any;
 }
 
-export function getCachedForm(formId: number): {
-  id: number;
+export function getCachedForm(formId: string): {
+  id: string;
   schema_json: string;
   name: string;
   version: number;
@@ -952,8 +1172,8 @@ export function clearCrashLogs(): void {
 
 /** Guarda o actualiza un participante en cache local */
 export function cacheParticipant(p: {
-  id: number;
-  projectId: number;
+  id: string;
+  projectId: string;
   fullName: string;
   documentType: string;
   documentNumber: string;
@@ -990,11 +1210,11 @@ export function cacheParticipant(p: {
 
 /** Lista participantes de un proyecto con búsqueda opcional */
 export function getCachedParticipants(
-  projectId: number,
+  projectId: string,
   search?: string,
 ): {
-  id: number;
-  project_id: number;
+  id: string;
+  project_id: string;
   full_name: string;
   document_type: string;
   document_number: string;
@@ -1031,9 +1251,9 @@ export function getCachedParticipants(
 }
 
 /** Obtiene un participante por ID */
-export function getCachedParticipant(participantId: number): {
-  id: number;
-  project_id: number;
+export function getCachedParticipant(participantId: string): {
+  id: string;
+  project_id: string;
   full_name: string;
   document_type: string;
   document_number: string;
@@ -1054,10 +1274,10 @@ export function getCachedParticipant(participantId: number): {
 
 /** Obtiene los formularios asociados a un participante con estado de aplicación */
 export function getParticipantFormStatus(
-  participantId: number,
-  projectId: number,
+  participantId: string,
+  projectId: string,
 ): {
-  template_id: number;
+  template_id: string;
   form_name: string;
   applied: boolean;
   applied_at: string | null;
@@ -1082,17 +1302,256 @@ export function getParticipantFormStatus(
        AND qr.participant_id = ?
        AND qr.status != 'draft'
      WHERE ft.project_id = ?
+       -- Retirados (H01): solo si ya tienen respuesta, para poder verla
+       AND (ft.retired = 0 OR qr.local_id IS NOT NULL)
      ORDER BY ft.name`,
     [participantId, projectId],
   ) as any;
 }
 
 /** Conteo de participantes en cache por proyecto */
-export function getParticipantCount(projectId: number): number {
+export function getParticipantCount(projectId: string): number {
   const db = getDatabase();
   const row = db.getFirstSync<{ count: number }>(
     `SELECT COUNT(*) as count FROM participants WHERE project_id = ?`,
     [projectId],
   );
   return row?.count ?? 0;
+}
+
+// ── Monitoreo del equipo y recorrido ─────────────────────────────────
+
+/** Lo que el supervisor ve en la web (Equipos de campo). */
+export function getDeviceQueueSummary(): {
+  pending: number;
+  error: number;
+  conflict: number;
+  draft: number;
+  pendingEvidence: number;
+  oldestPendingAt: string | null;
+  recentErrors: { at: string | null; message: string }[];
+} {
+  const db = getDatabase();
+  const counts = db.getAllSync<{ status: string; cnt: number }>(
+    `SELECT status, COUNT(*) as cnt FROM queued_records GROUP BY status`,
+  );
+  const by = Object.fromEntries(counts.map((r) => [r.status, r.cnt])) as Record<string, number>;
+  const oldest = db.getFirstSync<{ created_at: string | null }>(
+    `SELECT MIN(created_at) as created_at FROM queued_records WHERE status IN ('pending', 'error', 'conflict')`,
+  );
+  // Errores de registros (rechazos o fallos de envío) y de la app, más recientes primero
+  const recordErrors = db.getAllSync<{ at: string; message: string }>(
+    `SELECT updated_at as at, error_message as message FROM queued_records
+     WHERE error_message IS NOT NULL AND status IN ('pending', 'error')
+     ORDER BY updated_at DESC LIMIT 10`,
+  );
+  const crashErrors = db.getAllSync<{ at: string; message: string }>(
+    `SELECT created_at as at, message FROM crash_logs ORDER BY created_at DESC LIMIT 5`,
+  );
+  const recentErrors = [...recordErrors, ...crashErrors]
+    .sort((a, b) => (b.at ?? '').localeCompare(a.at ?? ''))
+    .slice(0, 20)
+    .map((e) => ({ at: sqliteToIso(e.at), message: String(e.message).slice(0, 500) }));
+  return {
+    pending: by.pending ?? 0,
+    error: by.error ?? 0,
+    conflict: by.conflict ?? 0,
+    draft: by.draft ?? 0,
+    pendingEvidence: getPendingEvidenceCount(),
+    oldestPendingAt: sqliteToIso(oldest?.created_at ?? null),
+    recentErrors,
+  };
+}
+
+/** datetime('now') de SQLite ("2026-10-18 14:05:00", UTC) → ISO con Z */
+export function sqliteToIso(value: string | null): string | null {
+  if (!value) return null;
+  return /[zZ]|[+-]\d\d:?\d\d$/.test(value) ? value : `${value.replace(' ', 'T')}Z`;
+}
+
+export function insertRoutePoint(point: { projectId: string | null; latitude: number; longitude: number; accuracy: number | null; recordedAt: string }): void {
+  getDatabase().runSync(
+    `INSERT INTO route_points (project_id, latitude, longitude, accuracy_m, recorded_at) VALUES (?, ?, ?, ?, ?)`,
+    [point.projectId, point.latitude, point.longitude, point.accuracy, point.recordedAt],
+  );
+}
+
+export function listUnsentRoutePoints(limit = 1000): { id: number; project_id: string | null; latitude: number; longitude: number; accuracy_m: number | null; recorded_at: string }[] {
+  return getDatabase().getAllSync(
+    `SELECT id, project_id, latitude, longitude, accuracy_m, recorded_at FROM route_points WHERE sent = 0 ORDER BY recorded_at ASC LIMIT ?`,
+    [limit],
+  ) as any;
+}
+
+export function markRoutePointsSent(ids: number[]): void {
+  if (!ids.length) return;
+  getDatabase().runSync(`UPDATE route_points SET sent = 1 WHERE id IN (${ids.map(() => '?').join(',')})`, ids);
+}
+
+/** Solo borra puntos ya recibidos por el servidor; los no enviados se conservan. */
+export function purgeSentRoutePoints(retentionDays = 7): void {
+  getDatabase().runSync(
+    `DELETE FROM route_points WHERE sent = 1 AND recorded_at < ?`,
+    [new Date(Date.now() - retentionDays * 86_400_000).toISOString()],
+  );
+}
+
+// ── Paquete sin conexión: participantes y asignaciones (H02) ─────────
+
+export interface CachedAssignment {
+  template_id: string;
+  participant_id: string;
+  access_mode: string;
+  assignment_status: string;
+  record_id: string | null;
+}
+
+/**
+ * Reemplaza en una sola transacción los participantes y asignaciones del
+ * proyecto por lo que el servidor autoriza hoy: quien ya no está asignado o
+ * cambió de territorio desaparece del teléfono. Los registros capturados no
+ * se tocan.
+ */
+export function replaceProjectSnapshot(
+  projectId: string,
+  participants: Parameters<typeof cacheParticipant>[0][],
+  assignments: CachedAssignment[],
+): void {
+  const db = getDatabase();
+  db.execSync('BEGIN');
+  try {
+    db.runSync(`DELETE FROM participants WHERE project_id = ?`, [projectId]);
+    for (const p of participants) cacheParticipant(p);
+    db.runSync(`DELETE FROM form_assignments_cache WHERE project_id = ?`, [projectId]);
+    for (const a of assignments) {
+      db.runSync(
+        `INSERT OR REPLACE INTO form_assignments_cache
+           (project_id, template_id, participant_id, access_mode, assignment_status, record_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [projectId, a.template_id, a.participant_id, a.access_mode, a.assignment_status, a.record_id],
+      );
+    }
+    db.runSync(
+      `INSERT OR REPLACE INTO offline_packages (project_id, downloaded_at, participant_count, assignment_count) VALUES (?, ?, ?, ?)`,
+      [projectId, new Date().toISOString(), participants.length, assignments.length],
+    );
+    db.execSync('COMMIT');
+  } catch (error) {
+    db.execSync('ROLLBACK');
+    throw error;
+  }
+}
+
+export function getOfflinePackage(projectId: string): { downloaded_at: string; participant_count: number; assignment_count: number } | null {
+  return getDatabase().getFirstSync(
+    `SELECT downloaded_at, participant_count, assignment_count FROM offline_packages WHERE project_id = ?`,
+    [projectId],
+  ) as any;
+}
+
+export function getCachedAssignment(projectId: string, templateId: string, participantId: string): CachedAssignment | null {
+  return getDatabase().getFirstSync(
+    `SELECT template_id, participant_id, access_mode, assignment_status, record_id
+     FROM form_assignments_cache WHERE project_id = ? AND template_id = ? AND participant_id = ?`,
+    [projectId, templateId, participantId],
+  ) as any;
+}
+
+export function getParticipantAssignments(projectId: string, participantId: string): CachedAssignment[] {
+  return getDatabase().getAllSync(
+    `SELECT template_id, participant_id, access_mode, assignment_status, record_id
+     FROM form_assignments_cache WHERE project_id = ? AND participant_id = ?`,
+    [projectId, participantId],
+  ) as any;
+}
+
+/** Estado del registro ya capturado en este teléfono para la actividad (sin borradores). */
+export function getLocalRecordStatus(templateId: string, participantId: string): string | null {
+  const row = getDatabase().getFirstSync<{ status: string }>(
+    `SELECT status FROM queued_records WHERE template_id = ? AND participant_id = ? AND status != 'draft'
+     ORDER BY created_at DESC LIMIT 1`,
+    [templateId, participantId],
+  );
+  return row?.status ?? null;
+}
+
+// ── Paquete de formularios versionado (H01) ─────────────────────────
+
+export interface CachedFormInput {
+  id: string;
+  projectId: string;
+  templateId: string;
+  name: string;
+  description?: string;
+  schemaJson: string;
+  accessMode?: string;
+  versionHash: string;
+  serverUpdatedAt?: string | null;
+}
+
+export function getFormVersion(formId: string): { version_hash: string | null; retired: number; server_updated_at: string | null } | null {
+  return getDatabase().getFirstSync(
+    `SELECT version_hash, retired, server_updated_at FROM form_templates WHERE id = ?`,
+    [formId],
+  ) as any;
+}
+
+/** Huella de cada formulario guardado en el teléfono para el proyecto. */
+export function getCachedFormVersions(projectId: string): Map<string, string | null> {
+  const rows = getDatabase().getAllSync<{ id: string; version_hash: string | null }>(
+    `SELECT id, version_hash FROM form_templates WHERE project_id = ?`,
+    [projectId],
+  );
+  return new Map(rows.map((r) => [r.id, r.version_hash]));
+}
+
+/**
+ * Aplica el paquete de formularios en una sola transacción: guarda los que
+ * cambiaron, retira los que el servidor ya no ofrece y borra del todo los
+ * retirados que no tienen registros en el teléfono. Un formulario retirado
+ * con borradores o pendientes se conserva para poder terminarlos y enviarlos.
+ */
+export function applyFormPackage(projectId: string, changed: CachedFormInput[], activeIds: string[]): { retired: number; removed: number } {
+  const db = getDatabase();
+  db.execSync('BEGIN');
+  try {
+    for (const f of changed) {
+      db.runSync(
+        `INSERT OR REPLACE INTO form_templates
+           (id, project_id, template_id, version, name, description, schema_json, access_mode, version_hash, retired, server_updated_at, downloaded_at)
+         VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, 0, ?, datetime('now'))`,
+        [f.id, f.projectId, f.templateId, f.name, f.description ?? null, f.schemaJson, f.accessMode ?? 'legacy', f.versionHash, f.serverUpdatedAt ?? null],
+      );
+    }
+    const marks = activeIds.map(() => '?').join(',');
+    if (activeIds.length) db.runSync(`UPDATE form_templates SET retired = 0 WHERE project_id = ? AND id IN (${marks})`, [projectId, ...activeIds]);
+    const retired = db.runSync(
+      `UPDATE form_templates SET retired = 1 WHERE project_id = ? AND retired = 0${activeIds.length ? ` AND id NOT IN (${marks})` : ''}`,
+      [projectId, ...activeIds],
+    ).changes;
+    const removed = db.runSync(
+      `DELETE FROM form_templates WHERE project_id = ? AND retired = 1
+         AND NOT EXISTS (SELECT 1 FROM queued_records q WHERE q.template_id = form_templates.id)`,
+      [projectId],
+    ).changes;
+    db.execSync('COMMIT');
+    return { retired, removed };
+  } catch (error) {
+    db.execSync('ROLLBACK');
+    throw error;
+  }
+}
+
+export function getRecordTemplateVersion(localId: string): string | null {
+  return getDatabase().getFirstSync<{ template_version: string | null }>(
+    `SELECT template_version FROM queued_records WHERE local_id = ?`,
+    [localId],
+  )?.template_version ?? null;
+}
+
+/** Registros del usuario activo que aún no están en el servidor. */
+export function getUnsentCount(): number {
+  return getDatabase().getFirstSync<{ n: number }>(
+    `SELECT COUNT(*) as n FROM queued_records WHERE status IN ('pending', 'error', 'conflict', 'draft', 'correction_pending', 'correction_conflict', 'correction_error')`,
+  )?.n ?? 0;
 }

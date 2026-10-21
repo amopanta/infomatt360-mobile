@@ -23,6 +23,7 @@ import {
 import { usePinStore } from '../../store/pinStore';
 import { useAuthStore } from '../../store/authStore';
 import { stopAutoSync } from '../../sync/syncService';
+import BrandHeader from '../../ui/BrandHeader';
 import { colors, spacing, fontSize, borderRadius } from '../../ui/theme';
 
 const PIN_LENGTH = 4;
@@ -128,8 +129,7 @@ export default function PinUnlockScreen() {
     <View style={styles.container}>
       <View style={styles.headerSection}>
         <Text style={styles.lockIcon}>🔒</Text>
-        <Text style={styles.title}>InfoMatt360</Text>
-        <Text style={styles.subtitle}>Ingrese su PIN para continuar</Text>
+        <BrandHeader light subtitle="Ingrese su PIN para continuar" />
       </View>
 
       {/* PIN dots */}
